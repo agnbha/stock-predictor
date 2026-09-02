@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-predictor"
+version = "0.1.0"
+description = "Predicts and serves the best intraday windows for the current session"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+
+# Deliberately few. The core (data, labels, eval, baselines) runs on the
+# standard library alone; the extras below are only needed for the pieces
+# that say so.
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+# Feature storage (section 8). Falls back to the built-in SQLite store when absent.
+store = ["duckdb>=0.10", "pyarrow>=14"]
+# Stage-1 model. Prefers LightGBM; falls back to scikit-learn's histogram GBDT
+# when LightGBM (or its libomp runtime) is unavailable.
+models = ["scikit-learn>=1.3", "lightgbm>=4.0"]
+# Serving (section 7).
+serving = ["fastapi>=0.110", "uvicorn>=0.27"]
+dev = ["pytest>=7.4", "httpx>=0.27"]
+all = [
+    "duckdb>=0.10", "pyarrow>=14",
+    "scikit-learn>=1.3", "lightgbm>=4.0",
+    "fastapi>=0.110", "uvicorn>=0.27",
+    "pytest>=7.4", "httpx>=0.27",
+]
+
+[project.scripts]
+stock-predictor = "stock_predictor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
