@@ -26,7 +26,8 @@ REGIME_FEATURE_NAMES = (
 
 def regime_features(views: AnalyzerViews, session_date: str, as_of: int) -> dict:
     """Breadth/dispersion from the *prior* completed session (available at any T
-    today), plus clock features for the current prediction point."""
+    today), plus clock features for ``as_of``. ``build_feature_frame`` replaces
+    ``regime_minutes_since_open`` with each row's own minute."""
     prior_sessions = [s for s in views.sessions(end=session_date) if s < session_date]
     breadth = views.market_breadth(prior_sessions[-1]) if prior_sessions else None
 

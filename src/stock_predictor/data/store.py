@@ -201,14 +201,25 @@ class Store:
 
     # -- intraday signals (model contract) --------------------------
 
-    def save_intraday_signals(self, rows: list[dict]) -> None:
+    def save_intraday_signals(self, rows: list[dict]) -> int:
+        """Store signals for candles not stored yet; returns how many were written.
+
+        stock-analyzer re-sends every completed candle of the session on each
+        poll (every 150 s), so most rows in a request are already here. Those
+        are skipped, not rewritten: a session keeps ~23k rows, and rewriting
+        them on every poll cost ~1.75M row writes. Skipping also keeps the
+        signal as first computed for that candle, and any ``realized_return_pct``
+        filled in since, which ``REPLACE`` would have reset to NULL.
+        """
         if not rows:
-            return
+            return 0
         cols = ["model_version", "symbol", "session_date", "ts_epoch", "horizon_minutes",
                 "signal", "probability", "reason"]
         with self.tx() as c:
+            before = c.total_changes
             c.executemany(
-                f"INSERT OR REPLACE INTO intraday_signal ({','.join(cols)}) "
+                f"INSERT OR IGNORE INTO intraday_signal ({','.join(cols)}) "
                 f"VALUES ({','.join('?' * len(cols))})",
                 [tuple(r.get(k) for k in cols) for r in rows],
             )
+            return c.total_changes - before

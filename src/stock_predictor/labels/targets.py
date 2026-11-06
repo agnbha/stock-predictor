@@ -103,6 +103,30 @@ def build_targets(
     return targets
 
 
+def adverse_excursions(views: AnalyzerViews, session_date: str, as_of: int) -> dict[str, float]:
+    """Largest fall below the as-of price over the rest of the session, in %
+    (positive = a fall), per symbol.
+
+    An *outcome*, like the gain label, so it lives here with the leakage rule:
+    it reads candles after ``as_of`` and is for scoring only. It backs the
+    ``adverse_rate`` metric -- whether a ranking picks better symbols or merely
+    more volatile ones (design 4.1, score order).
+    """
+    candles = views.intraday_candles(session_date)
+    price_at: dict[str, float] = {}
+    low_after: dict[str, float] = {}
+    for c in candles:  # ordered by symbol, ts
+        if c.ts_epoch <= as_of:
+            price_at[c.symbol] = c.close
+        else:
+            low_after[c.symbol] = min(low_after.get(c.symbol, c.low), c.low)
+    return {
+        s: max((p - low_after[s]) / p * 100.0, 0.0)
+        for s, p in price_at.items()
+        if s in low_after and p > 0
+    }
+
+
 def gain_band(gains: Sequence[float]) -> tuple[float, float, float]:
     """p25 / p50 / p75 of a set of realised gains -- the honest band the
     magnitude model is trained to reproduce (design section 1)."""

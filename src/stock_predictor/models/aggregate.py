@@ -49,7 +49,15 @@ def aggregate_to_topn(
     per_minute: Sequence[PerMinutePrediction],
     top_n: int = 5,
     entry_window_minutes: int = 15,
+    rank_by: str = "score",
+    atr_pct: Optional[dict[str, float]] = None,
 ) -> list[SymbolPrediction]:
+    """Reduce per-minute predictions to the top ``top_n`` symbols.
+
+    ``rank_by="risk_adjusted"`` orders by ``score / ATR%`` (design 4.1, score
+    order) so a symbol is not ranked first merely for moving the most; symbols
+    without an ATR keep their raw score. ``score`` itself is never rescaled.
+    """
     by_symbol: dict[str, list[PerMinutePrediction]] = {}
     for p in per_minute:
         by_symbol.setdefault(p.symbol, []).append(p)
@@ -75,7 +83,18 @@ def aggregate_to_topn(
                 entry_window_end=best.ts_epoch + entry_window_minutes * 60,
             )
         )
-    preds.sort(key=lambda s: s.score, reverse=True)
+    if rank_by == "risk_adjusted":
+        atr = atr_pct or {}
+
+        def key(p: SymbolPrediction) -> float:
+            a = atr.get(p.symbol)
+            return p.score / a if a and a > 0 else p.score
+
+        preds.sort(key=key, reverse=True)
+    elif rank_by == "score":
+        preds.sort(key=lambda s: s.score, reverse=True)
+    else:
+        raise ValueError(f"rank_by must be 'score' or 'risk_adjusted', got {rank_by!r}")
     return preds[:top_n]
 
 

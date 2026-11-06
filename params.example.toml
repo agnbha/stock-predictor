@@ -1,0 +1,76 @@
+# Candidate screening inputs -- design section 4.1.
+#
+# These are the code defaults; tests/test_candidates.py checks the two agree.
+# Copy this file, change what you need, and pass it with
+#     stock-predictor --params my-params.toml <command>
+# or set STOCK_PREDICTOR_PARAMS. One value at a time: --set rsi.filter=true
+#
+# Each input has two switches, both off by default:
+#   feature -- add its value as a stage-1 model column (retrain to take effect;
+#              serve with the same switches the model was trained with)
+#   filter  -- drop symbols failing its rule before ranking
+# A rule over a value that is not available yet (too little daily history, an
+# opening check whose time has not come) does not apply: the symbol is kept.
+#
+# Measure before switching anything on:  stock-predictor ablate
+
+# Opening-range and VWAP state at check_time. The opening range is the
+# high/low of the first opening_range_minutes after 09:15; states are
+# "below", "inside" or "above" it. Unknown before check_time.
+[opening_check]
+feature = false
+filter = false
+check_time = "09:45"
+opening_range_minutes = 15
+allowed_range_states = ["above"]
+require_above_vwap = true
+
+# Close-to-close gain over the last lookback_days completed sessions.
+# The filter drops symbols that have run up more than max_pct.
+[run_up]
+feature = false
+filter = false
+lookback_days = 5
+max_pct = 10.0
+
+# RSI over `period` completed sessions (simple-average, as v_symbol_trend).
+# The filter keeps min <= RSI <= max.
+[rsi]
+feature = false
+filter = false
+period = 14
+min = 30.0
+max = 70.0
+
+# Prior session's volume / mean of the lookback_days sessions before it.
+# The filter keeps relative volume >= min_relative_volume.
+[volume]
+feature = false
+filter = false
+lookback_days = 20
+min_relative_volume = 1.0
+
+# Where the prior session closed in its range: 0 = at the low, 1 = at the high.
+# The filter keeps min <= location <= max.
+[close_location]
+feature = false
+filter = false
+min = 0.5
+max = 1.0
+
+# How the final ranking is ordered. "score" = stage 2's discounted expected
+# move; "risk_adjusted" = that divided by ATR %, so a symbol is not ranked first
+# just for being volatile. adverse_move_pct sets the adverse_rate metric: share
+# of picks falling at least this far below their as-of price later that session.
+[score_order]
+rank_by = "score"
+adverse_move_pct = 2.0
+
+# Distance of the prior close below its lookback_days high, in % (0 = at the
+# high). Needs lookback_days sessions of daily history; until then it is
+# unavailable. The filter keeps symbols within max_dist_from_high_pct of it.
+[momentum]
+feature = false
+filter = false
+lookback_days = 120
+max_dist_from_high_pct = 10.0

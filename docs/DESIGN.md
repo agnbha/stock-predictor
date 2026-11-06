@@ -129,6 +129,28 @@ a deliberate contract; the tables behind them are not.
 Coupling is one-way and read-only. stock-predictor never writes to that
 database — it keeps its own.
 
+**Which ground truth, and which sessions.** stock-analyzer versions its
+detector, and the series moves on. As of 2026-11-05:
+
+| Detector | Symbols | Final sessions | Status |
+|---|---|---|---|
+| `topk-nonoverlap/highlow/v1` | 49 | 68, ends 2026-09-07 | no longer produced |
+| `topk-nonoverlap/highlow/min0.5/v1` | 62 | 108, 2026-06-02 → 2026-11-04 | **current default** |
+
+The `min0.5` detector keeps only windows of at least 0.5%, which is roughly
+where costs stop erasing a move (section 6). Staying on a retired detector fails
+quietly: newer sessions have no labels and drop out of every metric, and symbols
+added since score zero whenever they are picked. Training and evaluation
+therefore use only **completed sessions**, meaning those with `final` labels
+under the configured detector. That excludes today's session while it runs,
+because it has only `live` labels.
+
+**The universe grew from 49 to 62 symbols**, and the newer symbols' history was
+backfilled to 2026-08-07. Some were added because they currently top a CAN SLIM
+chart. That is selection on recent performance, applied to the past, so it
+flatters any strategy that favours them in the backfilled period. Open question
+2 (section 11) is now live, not hypothetical.
+
 ### 3.2 The day's own shape
 
 Open, high, low so far, opening-range break, gap versus prior close, VWAP and
@@ -172,8 +194,33 @@ Three groups, and the middle one is what makes a ranker work:
 **Per-symbol** — the 26 features already defined in stock-analyzer's contract
 (returns over several windows, volatility, ATR, VWAP distance, volume z-score
 against the same time of day, opening-range distances, gap, event flags), plus
-RSI, moving-average distances, 52-week range position and beta from its trend
+RSI, moving-average distances, 10-day range position and beta from its trend
 views.
+
+Every daily value is as of the last completed session *before* the one being
+predicted. The 10-day range position is computed from daily candles, not read
+from `v_range_context`. That view holds only the latest row per symbol, so it
+leaked the future into every historical session. The 52-week range position is
+dropped for the same reason. stock-analyzer keeps only a current snapshot of
+the 52-week high and low, and its daily history (108 sessions) is too short to
+rebuild one point-in-time. Beta is computed from daily candles over the
+sessions before the one being predicted, rather than read from
+`v_symbol_beta`, which also covers every session to date. Over all sessions
+the two agree to 1e-15. Applied to past sessions, the snapshot was well off:
+on 2026-07-15 the median symbol's beta was off by 0.26 and the worst by 1.15.
+Point-in-time beta is noisy for a symbol with only a few sessions of history.
+On 2026-08-17, one symbol added that month had a beta about 10 away from
+its current value.
+
+**Every row depends only on candles at or before its own minute.** A training
+frame is built once per session, to 15:00, so any value taken at the build
+time and copied to every row reaches back into earlier rows. Two did this
+until 2026-11-05. The distances from the 5/20/50-day averages used the 15:00
+close, so each 09:30 row knew where the stock ended the day. The regime
+clock was 345 minutes on every row. Both are now computed per row. A test
+builds a session at 10:30 and at 15:00 and requires the shared rows to match
+on every column. The saved training frames (section 8) rely on the same
+property.
 
 **Cross-sectional** — every per-symbol feature also enters as its **rank and
 z-score within that day's universe**. The question is "which of these 49 is
@@ -184,6 +231,62 @@ dominate.
 **Regime** — market breadth, mean universe return, dispersion, day of week,
 minutes since open. These are identical for every symbol on a day and exist to
 let the model condition on the kind of day it is.
+
+### 4.1 Candidate screening inputs — kept as parameters, measured before use
+
+Seven inputs were proposed for picking stocks and tested elsewhere first. The
+opening check was tested on 5,982 stock-sessions across these 62 symbols. The
+other inputs were tested on about 182,000 stock-sessions of the whole liquid
+market, against **next-day** moves. Most showed no reliable effect.
+
+They are kept here as named parameters in `params.py`, all defaults in
+`params.example.toml`, so they can be measured on **this** project's target
+rather than accepted or dropped on faith. Each input has two independent
+switches:
+
+- **`feature`** adds the input's value as a stage-1 column. This is soft: the
+  trees may ignore it. It takes effect on retraining, and the model card
+  records the switches so serving can match them.
+- **`filter`** drops symbols that fail the input's rule before ranking. This
+  is hard: it changes which symbols can be picked at all.
+
+Both are **off by default**. A rule over a value that is not available yet
+(too little daily history, or an opening check whose time has not come) does
+not apply, and the symbol is kept. `stock-predictor ablate` produces the
+numbers below. The target is the net-of-cost best window still open after T,
+measured at 09:45 so the opening check is known, over the 87 development
+sessions to 2026-10-05. Intervals are 95% bootstraps over sessions.
+
+| Input | Parameters (default) | Earlier finding (next day) | Measured here | Status |
+|---|---|---|---|---|
+| **Opening check** | `check_time` 09:45, `opening_range_minutes` 15, `allowed_range_states` [above], `require_above_vwap` true | Range and VWAP state at 09:45 told nothing about the rest of the day | **Informative, in reverse.** IC −0.15 [−0.19, −0.11]. The 14% above the range and above VWAP have 0.18 pp *less* remaining gain. Below-range, below-VWAP symbols have the most. As a filter it cuts both baselines' top-5 by ~0.4 pp | Off. Never use it as a breakout filter. As a feature it is the one worth a retrain test |
+| **Run-up cap** | `lookback_days` 5, `max_pct` 10 | No reliable effect | The cap rarely binds (98% pass). The 2% over it have +1.2 pp larger windows *and* a 32% adverse rate against 8%. That is a volatility signal. As a filter it costs 0.10 pp | Off |
+| **RSI limits** | `period` 14, `min` 30, `max` 70 | No reliable effect | IC +0.07 [+0.04, +0.10]: small. No pass/fail difference. As a filter it costs 0.16 pp on `yesterdays_leaders` | Off. `rsi14` is already a feature |
+| **Volume** | `lookback_days` 20, `min_relative_volume` 1.0 | No reliable effect | IC +0.01 [−0.02, +0.05]. Nothing | Off |
+| **Close location** | `min` 0.5, `max` 1.0 (prior-day close in its range) | No reliable effect | IC +0.04 [+0.01, +0.07]: barely there. No filter effect | Off |
+| **Score order** | `rank_by` score, `adverse_move_pct` 2.0 | The strongest fifth by score is just more volatile: 6.6% fall more than 4% next day, against 4.4% for the market | **Confirmed in kind.** By ATR quintile, net gain rises 0.63 → 1.11% while the adverse rate rises 5% → 14% | `score` stays the default. `risk_adjusted` is available. `adverse_rate` is reported for every strategy |
+| **Medium-term momentum** | `lookback_days` 120, `max_dist_from_high_pct` 10 | Points the right way over 10–20 sessions, but weakly. CAN SLIM covers that horizon | **Not measurable yet.** Daily history is 108 sessions, short of 120. A 60-day proxy: IC +0.03 [−0.03, +0.08], no top-5 effect | Off. Re-measure once 120 sessions exist: late November 2026 for the original 49 symbols, early 2027 for the 13 added later |
+
+How to read this:
+
+- **The target here is an upper bound.** It is the best window still
+  available, not a trade anyone took. Anything that tracks how much a symbol
+  moves will look informative against it. The adverse-rate columns are there
+  to catch that, which is how the run-up and score-order rows read.
+- **Six inputs are tested at once**, each against roughly 62 symbols a day. One
+  interval excluding zero by chance is plausible. RSI and close location are
+  within that noise. The opening check, at IC −0.15 with a tight interval, is
+  not.
+- **The two studies do not contradict each other.** The earlier tests asked
+  about next-day direction. This one asks how much upside is left today. The
+  opening check can say nothing about the first and something about the second.
+
+**Rule for switching one on.** A filter is switched on only if it raises top-5
+net gain on the development sessions, with an interval excluding zero, and does
+not raise the adverse rate. A feature is switched on only if a model retrained
+with it beats the model without it on walk-forward folds. Either is then
+confirmed once on the held-out month, and dropped if it does not hold there.
+None of the seven meets the filter rule today.
 
 ---
 
@@ -225,6 +328,12 @@ Magnitude and duration come from the same stage-1 outputs — quantiles of the
 predicted move for the gain band, and the horizon at which the upper barrier is
 most often struck for the duration bucket.
 
+How that number orders the universe is a parameter (`score_order.rank_by`,
+section 4.1). `score` ranks on it directly. `risk_adjusted` divides it by the
+symbol's ATR % first, so a symbol does not reach the top merely by being the
+most volatile. Any active filters are applied to the ordering before the top
+five are taken.
+
 Only a thin calibration sits on top: mapping stage-1 scores onto realistic
 gain expectations, a handful of parameters. That is the one place the 66-session
 limit genuinely binds, and fitting a few parameters on 66 days is defensible
@@ -239,7 +348,7 @@ Built and measured **before** any model, because without them a metric is just a
 number:
 
 1. **Yesterday's leaders** — the five that had the biggest windows last session.
-2. **Highest recent volatility** — the five with the widest 20-day ATR. This is
+2. **Highest recent volatility** — the five with the widest 20-day ATR. This is 
    the one to watch; volatility genuinely predicts the *size* of a move and is
    the honest competitor.
 3. **stock-analyzer's time-of-day prior** — already implemented there.
@@ -270,6 +379,13 @@ over a million *examples*.
 - **Quantile coverage** — do 50% of outcomes fall inside the p25–p75 band. A
   miscalibrated band is worse than no band.
 - **Duration accuracy** by bucket.
+- **Adverse rate.** The share of picks that fell at least
+  `score_order.adverse_move_pct` (default 2%) below their as-of price later in
+  the session. Realised gain is the best window still available, so a ranking
+  can raise it just by picking more volatile symbols. This metric shows the
+  cost of doing so. On the 87 development sessions at T1, `highest_volatility`
+  earns 1.39% net with a 22% adverse rate, against 0.91% and 8% for
+  `random_five`.
 
 **A held-out final month, never touched during development.** With 66 sessions
 this costs about a third of the data, and it is still the right call: it is the
@@ -334,21 +450,27 @@ held-out metrics slowly become a historical curiosity.
 ```
 stock-predictor/
 ├── pyproject.toml
+├── params.example.toml  candidate-input parameters, all defaults (section 4.1)
 ├── src/stock_predictor/
-│   ├── data/          read-only access to stock-analyzer's views; own store
-│   ├── labels/        target construction, with the leakage rule enforced in one place
-│   ├── features/      per-symbol, cross-sectional, regime; parity with the Java contract
+│   ├── params.py      the parameters: defaults, TOML/JSON file, --set overrides
+│   ├── filters.py     hard filter rules over the candidate inputs
+│   ├── data/          read-only access to stock-analyzer's views; own store; saved training frames
+│   ├── labels/        target construction and adverse moves, with the leakage rule in one place
+│   ├── features/      per-symbol, cross-sectional, regime, candidate inputs; parity with the Java contract
 │   ├── fundamentals/  FundamentalScore protocol + null implementation
 │   ├── models/        ranker, magnitude, duration; train and predict
-│   ├── eval/          walk-forward splitter, baselines, metrics
+│   ├── eval/          walk-forward splitter, baselines, metrics, ablation of candidate inputs
 │   ├── serving/       FastAPI app, scheduler, cache
-│   └── cli.py         build-features | train | evaluate | serve | backtest
+│   └── cli.py         build-features | train | evaluate | backtest | ablate | params | serve | score
 ├── tests/
 └── docs/DESIGN.md
 ```
 
-Python 3.12, FastAPI, uvicorn, LightGBM, pandas, DuckDB for feature storage,
-pytest. Dependencies deliberately few.
+Python 3.12, FastAPI, uvicorn, LightGBM, pandas, Parquet for saved training
+frames (one file per completed session), pytest. Dependencies deliberately few.
+
+[ARCHITECTURE.md](ARCHITECTURE.md) has the module diagram, where each piece of
+data is stored, and the measured daily churn.
 
 ---
 
@@ -361,6 +483,7 @@ pytest. Dependencies deliberately few.
 | 3 | Feature pipeline, with parity against the Java fixture | |
 | 4 | Ranker, measured against the baselines | First point a model exists |
 | 5 | Magnitude quantiles and duration buckets | Only useful once the ranking is |
+| 5a | Candidate screening inputs as parameters, plus `ablate` (4.1) | Each must be measured on this target before it is switched on |
 | 6 | FastAPI serving, scheduler, prediction storage | |
 | 7 | Fundamentals score (3.3) | Needs a data source decision first |
 | 8 | News sentiment (3.4) | Stretch, and only if 1–7 are working |

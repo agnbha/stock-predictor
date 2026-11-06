@@ -29,6 +29,11 @@ class ModelCard:
     train_sessions: int
     feature_names: list[str]
     holdout_metrics: dict[str, float] = field(default_factory=dict)
+    # The params the model was trained with -- candidate `feature` switches
+    # decide its columns, so serving needs the same ones (design 4.1).
+    params: dict[str, Any] = field(default_factory=dict)
+    # Training kept every k-th minute (training_set); 1 = every minute.
+    minute_step: int = 1
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 

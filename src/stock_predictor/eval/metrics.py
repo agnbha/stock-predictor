@@ -5,6 +5,9 @@
 2. Precision@5 and NDCG@5 -- did the picks land in the day's genuine top set.
 3. Quantile coverage -- do ~50% of outcomes fall inside the p25-p75 band.
 4. Duration accuracy by bucket.
+5. Adverse rate -- share of picks that fell at least ``adverse_move_pct`` below
+   their as-of price later that session. A ranking that wins on gain only by
+   picking more volatile symbols shows up here (design 4.1, score order).
 
 A "prediction" here is an ordered list of :class:`Pick`. "Truth" is the
 :class:`~stock_predictor.labels.targets.Target` list for the same
@@ -110,9 +113,22 @@ def duration_accuracy(picks: Sequence[Pick], truth: Sequence[Target], k: int = 5
     return correct / total if total else 0.0
 
 
+def adverse_rate(picks: Sequence[Pick], adverse: dict[str, float], k: int = 5,
+                 threshold_pct: float = 2.0) -> float:
+    """Share of the top-k picks whose price later fell ``threshold_pct`` or more
+    below the as-of price. ``adverse`` comes from
+    :func:`~stock_predictor.labels.targets.adverse_excursions`."""
+    scored = [adverse[p.symbol] for p in picks[:k] if p.symbol in adverse]
+    if not scored:
+        return 0.0
+    return sum(1 for a in scored if a >= threshold_pct) / len(scored)
+
+
 def evaluate(picks: Sequence[Pick], truth: Sequence[Target], k: int = 5,
-             rates: Optional[ChargeRates] = None) -> dict[str, float]:
-    return {
+             rates: Optional[ChargeRates] = None,
+             adverse: Optional[dict[str, float]] = None,
+             adverse_move_pct: float = 2.0) -> dict[str, float]:
+    out = {
         "realised_net_gain": realised_net_gain(picks, truth, k, rates),
         "precision_at_k": precision_at_k(picks, truth, k),
         "ndcg_at_k": ndcg_at_k(picks, truth, k, rates),
@@ -120,6 +136,9 @@ def evaluate(picks: Sequence[Pick], truth: Sequence[Target], k: int = 5,
         "duration_accuracy": duration_accuracy(picks, truth, k),
         "hits": float(hit_count(picks, truth, k)),
     }
+    if adverse is not None:
+        out["adverse_rate"] = adverse_rate(picks, adverse, k, adverse_move_pct)
+    return out
 
 
 def aggregate(per_session: Sequence[dict[str, float]]) -> dict[str, float]:

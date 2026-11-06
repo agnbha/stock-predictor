@@ -48,7 +48,12 @@ class ForwardModel:
         return np.asarray(frame[list(self.feature_names)].to_numpy(dtype=float))
 
     def fit(self, frame, label_class: Sequence[int], forward_return_pct: Sequence[float]) -> "ForwardModel":
-        X = self._matrix(frame)
+        return self.fit_matrix(self._matrix(frame), label_class, forward_return_pct)
+
+    def fit_matrix(self, X: np.ndarray, label_class: Sequence[int],
+                   forward_return_pct: Sequence[float]) -> "ForwardModel":
+        """Fit on a ready matrix whose columns are ``feature_names``, in order
+        (``training_set`` builds one)."""
         y_up = (np.asarray(label_class) > 0).astype(int)
         self._clf.fit(X, y_up)
         self._qr.fit(X, np.asarray(forward_return_pct, dtype=float))

@@ -99,6 +99,30 @@ class AnalyzerViews:
         sql += " ORDER BY session_date"
         return [r[0] for r in self._conn.execute(sql, args)]
 
+    def completed_sessions(
+        self,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        detector_version: Optional[str] = None,
+    ) -> list[str]:
+        """Sessions with minute data **and** final ground truth under the
+        detector -- the only sessions that can be trained on or scored.
+
+        Excludes the session in progress (it has only ``live`` labels) and any
+        session the detector has not been run over. Use :meth:`sessions` for
+        serving, which has to work on today.
+        """
+        dv = detector_version or CONFIG.detector_version
+        labelled = {
+            r[0]
+            for r in self._conn.execute(
+                "SELECT DISTINCT session_date FROM v_opportunity_markers "
+                "WHERE detector_version = ? AND source = 'final'",
+                (dv,),
+            )
+        }
+        return [s for s in self.sessions(start, end) if s in labelled]
+
     def universe(self, session_date: str) -> list[str]:
         """Symbols with minute data on a given session, sorted."""
         rows = self._conn.execute(
@@ -166,6 +190,17 @@ class AnalyzerViews:
             args.append(before)
         sql += " ORDER BY symbol, session_date"
         return [Candle(**dict(r)) for r in self._conn.execute(sql, args)]
+
+    def candle_digest(self) -> list[tuple]:
+        """Per (session, symbol): candle count, first/last ts and volume and
+        price totals -- one pass over the minute candles, so saved frames can
+        tell whether stock-analyzer has rewritten a session since."""
+        return self._conn.execute(
+            "SELECT session_date, symbol, COUNT(*), MIN(ts_epoch), MAX(ts_epoch), "
+            "TOTAL(volume), ROUND(TOTAL(open), 4), ROUND(TOTAL(high), 4), "
+            "ROUND(TOTAL(low), 4), ROUND(TOTAL(close), 4) "
+            "FROM v_intraday_candles GROUP BY session_date, symbol ORDER BY session_date, symbol"
+        ).fetchall()
 
     def prior_session_context(self, symbol: str, session_date: str) -> Optional[dict]:
         """Prior session's close/high/low for a symbol -- the gap and prior-day

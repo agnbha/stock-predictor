@@ -16,6 +16,7 @@ from stock_predictor.config import CONFIG
 from stock_predictor.data.analyzer import AnalyzerViews
 from stock_predictor.data.store import PredictionRow, Store
 from stock_predictor.eval.baselines import run_baseline
+from stock_predictor.filters import apply_filters
 from stock_predictor.labels.targets import build_targets
 from stock_predictor.serving.cache import CachedRanking, PredictionCache, RankedPick
 
@@ -58,7 +59,8 @@ class PredictorService:
                 return self._score_with_model(session_date, as_of)
             except Exception:
                 pass  # fall through to baseline; never fail the request path
-        baseline = run_baseline("highest_volatility", self.views, session_date, as_of, CONFIG.top_n)
+        ranked = run_baseline("highest_volatility", self.views, session_date, as_of, 10**6)
+        baseline = apply_filters(self.views, session_date, as_of, ranked, CONFIG.top_n)
         return [
             RankedPick(
                 rank=i + 1, symbol=p.symbol,
@@ -69,22 +71,11 @@ class PredictorService:
         ]
 
     def _score_with_model(self, session_date: str, as_of: int) -> list[RankedPick]:
-        from stock_predictor.features.pipeline import build_feature_frame, latest_row_per_symbol
-        from stock_predictor.models.aggregate import PerMinutePrediction, aggregate_to_topn
+        from stock_predictor.models.rank import rank_session
 
-        frame = build_feature_frame(self.views, session_date, as_of)
-        if frame.empty:
+        top = rank_session(self.model, self.views, session_date, as_of, CONFIG.top_n)
+        if not top:
             raise RuntimeError("no features")
-        pred = self.model.predict(frame)
-        per_minute = [
-            PerMinutePrediction(
-                symbol=frame.iloc[i]["symbol"], ts_epoch=int(frame.iloc[i]["ts_epoch"]),
-                p_up=float(pred.p_up[i]), gain_p25=float(pred.gain_p25[i]),
-                gain_p50=float(pred.gain_p50[i]), gain_p75=float(pred.gain_p75[i]),
-            )
-            for i in range(len(frame))
-        ]
-        top = aggregate_to_topn(per_minute, CONFIG.top_n)
         return [
             RankedPick(
                 rank=i + 1, symbol=s.symbol,

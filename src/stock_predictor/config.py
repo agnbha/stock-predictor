@@ -37,10 +37,19 @@ class Config:
     artifacts_dir: Path = field(
         default_factory=lambda: _env_path("STOCK_PREDICTOR_ARTIFACTS", _REPO_ROOT / "artifacts")
     )
+    # Saved training frames, one Parquet file per completed session.
+    frames_dir: Path = field(
+        default_factory=lambda: _env_path("STOCK_PREDICTOR_FRAMES", _REPO_ROOT / "data" / "frames")
+    )
 
     # The opportunity detector version to learn from. stock-analyzer versions its
     # ground truth so a rules change produces a parallel series (design section 1).
-    detector_version: str = os.environ.get("STOCK_PREDICTOR_DETECTOR", "topk-nonoverlap/highlow/v1")
+    # ``highlow/v1`` stopped at 2026-09-07 and never covered the symbols added
+    # later; ``min0.5/v1`` covers every symbol and session and only keeps windows
+    # of at least 0.5% -- roughly where costs stop erasing a move (design 6).
+    detector_version: str = os.environ.get(
+        "STOCK_PREDICTOR_DETECTOR", "topk-nonoverlap/highlow/min0.5/v1"
+    )
 
     # How many windows a prediction contains.
     top_n: int = int(os.environ.get("STOCK_PREDICTOR_TOP_N", "5"))

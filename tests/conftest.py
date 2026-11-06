@@ -32,7 +32,7 @@ def views():
 
 @pytest.fixture(scope="session")
 def sessions(views):
-    return views.sessions()
+    return views.completed_sessions()
 
 
 @pytest.fixture
