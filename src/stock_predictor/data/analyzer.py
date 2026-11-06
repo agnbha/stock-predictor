@@ -6,21 +6,31 @@ here can never write to it.
 
 Every method takes an ``as_of`` epoch where leakage is possible and filters on
 it in SQL; nothing downstream is trusted to remember.
+
+``v_intraday_candles`` holds finished sessions only: stock-analyzer writes the
+day's candles there after the close. With ``live=True``, today's session is
+read instead from ``v_intraday_merged``, which adds the candles its daemon
+records during the session; the candle still forming is left out. Every
+other read is of sessions before the one being predicted, so it needs nothing
+live.
 """
 
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
+from stock_predictor.clock import NSE
 from stock_predictor.config import CONFIG
 
 # The view contract. Anything not on this list is off-limits.
 CONTRACT_VIEWS = (
     "v_intraday_candles",
+    "v_intraday_merged",
     "v_daily_candles",
     "v_symbol_trend",
     "v_support_resistance",
@@ -59,8 +69,13 @@ class Opportunity:
     source: str  # 'final' or 'live'
 
 
+# How long today's candles are reused before asking the database again. One
+# feature build reads them once per symbol; stock-analyzer adds a minute at a time.
+LIVE_REFRESH_SECONDS = 15.0
+
+
 class AnalyzerViews:
-    def __init__(self, db_path: Optional[Path] = None):
+    def __init__(self, db_path: Optional[Path] = None, live: bool = False):
         self.db_path = Path(db_path or CONFIG.analyzer_db)
         if not self.db_path.exists():
             raise FileNotFoundError(
@@ -68,10 +83,16 @@ class AnalyzerViews:
                 "Set STOCK_ANALYZER_DB or check out stock-analyzer beside this project."
             )
         # mode=ro: the coupling is one-way and read-only (design section 3.1).
+        # Not immutable=1: stock-analyzer's daemon writes live candles all
+        # session, and an "immutable" reader then sees stale pages and, once a
+        # checkpoint rewrites them mid-read, "database disk image is malformed".
         self._conn = sqlite3.connect(
-            f"file:{self.db_path}?mode=ro&immutable=1", uri=True, check_same_thread=False
+            f"file:{self.db_path}?mode=ro", uri=True, check_same_thread=False
         )
         self._conn.row_factory = sqlite3.Row
+        self.live = live
+        self.live_session: Optional[str] = None  # pins "today" (tests); else the date in IST
+        self._live_cache: Optional[tuple[str, float, list[Candle]]] = None
 
     def close(self) -> None:
         self._conn.close()
@@ -123,8 +144,58 @@ class AnalyzerViews:
         }
         return [s for s in self.sessions(start, end) if s in labelled]
 
+    # -- the session in progress (live=True) ----------------------------------
+
+    def session_in_progress(self) -> Optional[str]:
+        """Today's session date (IST) when reading live, else None."""
+        if not self.live:
+            return None
+        return self.live_session or NSE.session_date_of(int(time.time())).isoformat()
+
+    def _live_candles(self, session_date: str) -> Optional[list[Candle]]:
+        """Finished minute candles of the session in progress, or None for any
+        other session."""
+        if session_date != self.session_in_progress():
+            return None
+        now = time.monotonic()
+        cached = self._live_cache
+        if cached and cached[0] == session_date and now - cached[1] < LIVE_REFRESH_SECONDS:
+            return cached[2]
+        rows = self._conn.execute(
+            "SELECT symbol, ts_epoch, session_date, open, high, low, close, volume "
+            "FROM v_intraday_merged WHERE session_date = ? AND source != 'forming' "
+            "ORDER BY symbol, ts_epoch",
+            (session_date,),
+        )
+        candles = [Candle(**dict(r)) for r in rows]
+        self._live_cache = (session_date, now, candles)
+        return candles
+
+    def last_finished_minute(self, session_date: str, share: float = 0.9) -> Optional[int]:
+        """The latest minute that at least ``share`` of the symbols have
+        finished. stock-analyzer writes the session in progress a symbol at a
+        time and polls a few more often, so the newest minute is often held
+        by only some symbols; predicting at it would rank those few against
+        each other in the cross-sectional features."""
+        live = self._live_candles(session_date)
+        if live is not None:
+            latest: dict[str, int] = {}
+            for c in live:
+                latest[c.symbol] = max(latest.get(c.symbol, 0), c.ts_epoch)
+            if not latest:
+                return None
+            ordered = sorted(latest.values(), reverse=True)
+            return ordered[max(0, int(len(ordered) * share + 0.999999) - 1)]
+        row = self._conn.execute(
+            "SELECT MAX(ts_epoch) FROM v_intraday_candles WHERE session_date = ?", (session_date,)
+        ).fetchone()
+        return row[0] if row else None
+
     def universe(self, session_date: str) -> list[str]:
         """Symbols with minute data on a given session, sorted."""
+        live = self._live_candles(session_date)
+        if live is not None:
+            return sorted({c.symbol for c in live})
         rows = self._conn.execute(
             "SELECT DISTINCT symbol FROM v_intraday_candles WHERE session_date = ? ORDER BY symbol",
             (session_date,),
@@ -140,6 +211,11 @@ class AnalyzerViews:
         as_of: Optional[int] = None,
     ) -> list[Candle]:
         """Minute candles for a session. ``as_of`` clips to ``ts_epoch <= as_of``."""
+        live = self._live_candles(session_date)
+        if live is not None:
+            wanted = set(symbols) if symbols else None
+            return [c for c in live if (wanted is None or c.symbol in wanted)
+                    and (as_of is None or c.ts_epoch <= as_of)]
         sql = (
             "SELECT symbol, ts_epoch, session_date, open, high, low, close, volume "
             "FROM v_intraday_candles WHERE session_date = ?"

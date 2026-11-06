@@ -16,6 +16,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 
+from stock_predictor.models.calibrate import GainCalibrator
 from stock_predictor.models.gbdt import GBDTClassifier, GBDTQuantileRegressor, backend_name
 
 
@@ -25,6 +26,9 @@ class ForwardPrediction:
     gain_p25: np.ndarray
     gain_p50: np.ndarray
     gain_p75: np.ndarray
+    # p_up mapped to how often that probability came true on sessions the
+    # model had not seen; None when the model carries no calibrator.
+    p_seen: Optional[np.ndarray] = None
 
     @property
     def expected_move(self) -> np.ndarray:
@@ -39,6 +43,7 @@ class ForwardModel:
     _clf: GBDTClassifier = field(default_factory=GBDTClassifier)
     _qr: GBDTQuantileRegressor = field(default_factory=GBDTQuantileRegressor)
     trained: bool = False
+    calibrator: Optional[GainCalibrator] = None  # P(up) -> rate seen (train --target)
 
     @property
     def backend(self) -> str:
@@ -65,9 +70,12 @@ class ForwardModel:
             raise RuntimeError("ForwardModel.predict called before fit")
         X = self._matrix(frame)
         q = self._qr.predict(X)
+        p = np.asarray(self._clf.predict_proba(X))
+        cal = getattr(self, "calibrator", None)
         return ForwardPrediction(
-            p_up=np.asarray(self._clf.predict_proba(X)),
+            p_up=p,
             gain_p25=np.asarray(q[0.25]),
             gain_p50=np.asarray(q[0.5]),
             gain_p75=np.asarray(q[0.75]),
+            p_seen=None if cal is None else np.array([cal.transform(x) for x in p]),
         )

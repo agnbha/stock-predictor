@@ -1,14 +1,18 @@
 """Saved training frames: one Parquet file per completed session.
 
-Building one session's labelled frame from stock-analyzer's views takes about
+Building one session's feature frame from stock-analyzer's views takes about
 7 s, so every ``train`` spent ~13 minutes rebuilding 108 sessions that had not
 changed. Reading one back takes a fraction of a second.
+
+A saved frame holds features only. Labels are attached when it is loaded
+(``models/training.py``), from the session's full minute candles, so training
+for a different target or horizon reuses every saved frame.
 
 A saved frame is used only if it was built from the same three things:
 
 * **Variant**: the candidate inputs switched on as features, with their
-  parameters, and the triple-barrier settings. Each variant gets its own
-  folder, so switching a feature on and off for a comparison keeps both sets.
+  parameters. Each variant gets its own folder, so switching a feature on and
+  off for a comparison keeps both sets.
 * **Code**: a hash of the source files that build frames. Editing any of them
   rebuilds every frame, so nobody has to remember to bump a version.
 * **Data**: a hash chained through every session up to and including this
@@ -39,14 +43,13 @@ from stock_predictor.data.analyzer import AnalyzerViews
 
 _PKG = Path(__file__).resolve().parents[1]
 
-# Everything that turns stock-analyzer's views into a labelled training frame.
+# Everything that turns stock-analyzer's views into a saved feature frame.
 _FRAME_SOURCES = (
     "features",
     "data/analyzer.py",
     "data/framestore.py",
     "clock.py",
     "params.py",
-    "models/triple_barrier.py",
     "models/training.py",
 )
 
@@ -105,6 +108,9 @@ class FrameStore:
 
     def path(self, variant: str, session_date: str, key: str) -> Path:
         return self.root / variant / f"{session_date}.{key[:16]}.parquet"
+
+    def has(self, variant: str, session_date: str, key: str) -> bool:
+        return self.path(variant, session_date, key).exists()
 
     def load(self, variant: str, session_date: str, key: str):
         p = self.path(variant, session_date, key)

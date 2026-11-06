@@ -1,8 +1,9 @@
 """Model artefacts and versioning.
 
-A model version is ``<backend>-triple-barrier/<trained-through-date>`` so a
-served answer always names the exact model behind it (design section 7, the
-``/model`` endpoint and the ``model_version`` on every stored prediction).
+A model version is ``<backend>-triple-barrier/<trained-through-date>`` (or
+``<backend>-target-1pct-40m/<date>`` for a fixed target) so a served answer
+always names the exact model behind it (design section 7, the ``/model``
+endpoint and the ``model_version`` on every stored prediction).
 """
 
 from __future__ import annotations
@@ -17,7 +18,14 @@ from typing import Any, Optional
 from stock_predictor.config import CONFIG
 
 
-def model_version_string(backend: str, trained_through: str) -> str:
+def model_version_string(backend: str, trained_through: str, target=None) -> str:
+    """``target`` is the TripleBarrierConfig trained on; a fixed target names
+    itself so models for different targets do not overwrite each other."""
+    if target is not None and target.fixed:
+        stop = f"-stop{target.stop_pct:g}pct" if target.stop_pct is not None else ""
+        return f"{backend}-target-{target.target_pct:g}pct{stop}-{target.horizon_minutes}m/{trained_through}"
+    if target is not None and target.horizon_minutes != 30:
+        return f"{backend}-triple-barrier-{target.horizon_minutes}m/{trained_through}"
     return f"{backend}-triple-barrier/{trained_through}"
 
 
@@ -34,7 +42,18 @@ class ModelCard:
     params: dict[str, Any] = field(default_factory=dict)
     # Training kept every k-th minute (training_set); 1 = every minute.
     minute_step: int = 1
+    # The label trained on (TripleBarrierConfig as a dict); empty = the default.
+    target: dict[str, Any] = field(default_factory=dict)
+    # For a fixed target: P(target) as predicted vs as seen, on sessions the
+    # calibration model had not trained on (rows: band, predicted, seen, rows).
+    calibration: list[dict[str, Any]] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+def card_target(card: ModelCard):
+    from stock_predictor.models.triple_barrier import TripleBarrierConfig
+
+    return TripleBarrierConfig(**card.target) if card.target else TripleBarrierConfig()
 
 
 class ModelRegistry:

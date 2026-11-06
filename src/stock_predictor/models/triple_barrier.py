@@ -1,19 +1,31 @@
 """Triple-barrier labelling for the stage-1 per-candle model (design section 5).
 
 For each minute, look forward H minutes: an upper barrier at +u, a lower at -d,
-a time barrier at H. Barriers are scaled by recent ATR so they mean the same
-thing in calm and volatile conditions. This is the labelling stock-analyzer's
-model contract already describes -- the two share a definition.
+a time barrier at H. By default the barriers are scaled by recent ATR so they
+mean the same thing in calm and volatile conditions. This is the labelling
+stock-analyzer's model contract already describes -- the two share a definition.
 
-``triple_barrier_labels`` works on one symbol's ordered close/high/low/atr
-series and returns, per row: the outcome class, the realised forward return %,
-and minutes-to-first-barrier (for the duration bucket).
+A fixed target instead asks a plain question: does the price touch
++``target_pct`` within the next H minutes? ``stop_pct`` adds a lower barrier
+at -``stop_pct``, so the label becomes "target before stop".
+
+Entry is the close of the row's own candle; the window is the candles after
+it whose start is within H clock minutes (a minute with no trades is a gap,
+not a shorter window). When one candle reaches both barriers, the order inside
+it is unknown and the row counts as stopped. A row whose window runs past the
+session's last candle is marked incomplete: its outcome is cut short, so it is
+not trained on.
+
+``barrier_arrays`` labels one symbol's ordered series at once;
+``triple_barrier_labels`` is the same as a list of outcomes.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Sequence
+
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -22,6 +34,21 @@ class TripleBarrierConfig:
     upper_atr_mult: float = 1.0
     lower_atr_mult: float = 1.0
     min_barrier_pct: float = 0.15  # floor so a dead-calm ATR still needs a real move
+    # Fixed barriers instead of ATR-scaled ones (the ATR settings are then
+    # unused): +target_pct within the horizon; stop_pct adds a lower barrier.
+    target_pct: Optional[float] = None
+    stop_pct: Optional[float] = None
+
+    @property
+    def fixed(self) -> bool:
+        return self.target_pct is not None
+
+    def describe(self) -> str:
+        h = f"{self.horizon_minutes} min"
+        if not self.fixed:
+            return f"+{self.upper_atr_mult:g}/-{self.lower_atr_mult:g} x ATR within {h}"
+        stop = f" before -{self.stop_pct:g}%" if self.stop_pct is not None else ""
+        return f"+{self.target_pct:g}%{stop} within {h}"
 
 
 @dataclass(frozen=True)
@@ -30,6 +57,71 @@ class BarrierOutcome:
     label: int              # +1 upper hit first, -1 lower hit first, 0 time barrier
     forward_return_pct: float
     minutes_to_barrier: int
+    complete: bool = True   # the whole window lies inside the session
+
+
+def barrier_arrays(
+    close: Sequence[float],
+    high: Sequence[float],
+    low: Sequence[float],
+    atr_pct: Optional[Sequence[float]],
+    cfg: Optional[TripleBarrierConfig] = None,
+    ts: Optional[Sequence[int]] = None,
+    last_ts: Optional[int] = None,
+) -> dict[str, np.ndarray]:
+    """Labels for one symbol's candles, in order.
+
+    ``ts`` (epoch seconds) makes the window H clock minutes; without it, H
+    candles. ``last_ts`` is the start of the session's last minute: a window
+    ending after it is incomplete. Without it, the last candle given.
+    Returns arrays ``label`` (int8), ``forward_return_pct`` (close at the end of
+    the window, vs entry), ``minutes_to_barrier`` and ``complete``.
+    """
+    c = cfg or TripleBarrierConfig()
+    cl = np.asarray(close, dtype=np.float64)
+    hi = np.asarray(high, dtype=np.float64)
+    lo = np.asarray(low, dtype=np.float64)
+    n = len(cl)
+    idx = np.arange(n)
+    t = np.asarray(ts, dtype=np.int64) if ts is not None else idx * 60
+    limit = t + c.horizon_minutes * 60
+    if c.fixed:
+        up = cl * (1 + c.target_pct / 100.0)
+        dn = cl * (1 - c.stop_pct / 100.0) if c.stop_pct is not None else np.full(n, -np.inf)
+    else:
+        atr = np.zeros(n) if atr_pct is None else np.nan_to_num(np.asarray(atr_pct, dtype=np.float64))
+        band = np.maximum(atr, c.min_barrier_pct)
+        up = cl * (1 + c.upper_atr_mult * band / 100.0)
+        dn = cl * (1 - c.lower_atr_mult * band / 100.0)
+
+    first_up = np.full(n, n)  # index of the first candle to reach each barrier; n = none
+    first_dn = np.full(n, n)
+    end = idx.copy()
+    for k in range(1, c.horizon_minutes + 1):
+        j = idx + k
+        ok = j < n
+        j = np.where(ok, j, n - 1)
+        ok &= t[j] <= limit
+        if not ok.any():
+            break
+        m = ok & (first_up == n) & (hi[j] >= up)
+        first_up[m] = j[m]
+        m = ok & (first_dn == n) & (lo[j] <= dn)
+        first_dn[m] = j[m]
+        end[ok] = j[ok]
+
+    stopped = (first_dn < n) & (first_dn <= first_up)
+    hit = (first_up < n) & ~stopped
+    label = np.where(stopped, -1, np.where(hit, 1, 0)).astype(np.int8)
+    at = np.where(stopped, first_dn, np.where(hit, first_up, end))
+    minutes = (t[at] - t) // 60
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fwd = (cl[end] - cl) / cl * 100.0
+    dead = cl <= 0
+    label[dead], fwd[dead], minutes[dead] = 0, 0.0, c.horizon_minutes
+    complete = limit <= (last_ts if last_ts is not None else (t[-1] if n else 0))
+    return {"label": label, "forward_return_pct": fwd, "minutes_to_barrier": minutes,
+            "complete": complete}
 
 
 def triple_barrier_labels(
@@ -38,27 +130,12 @@ def triple_barrier_labels(
     low: Sequence[float],
     atr_pct: Sequence[float],
     cfg: Optional[TripleBarrierConfig] = None,
+    ts: Optional[Sequence[int]] = None,
+    last_ts: Optional[int] = None,
 ) -> list[BarrierOutcome]:
-    c = cfg or TripleBarrierConfig()
-    n = len(close)
-    out: list[BarrierOutcome] = []
-    for i in range(n):
-        entry = close[i]
-        if entry <= 0:
-            out.append(BarrierOutcome(i, 0, 0.0, c.horizon_minutes))
-            continue
-        band = max(atr_pct[i] if i < len(atr_pct) else 0.0, c.min_barrier_pct)
-        up = entry * (1 + c.upper_atr_mult * band / 100.0)
-        dn = entry * (1 - c.lower_atr_mult * band / 100.0)
-        end = min(i + c.horizon_minutes, n - 1)
-        label, mins = 0, end - i
-        for j in range(i + 1, end + 1):
-            if high[j] >= up:
-                label, mins = 1, j - i
-                break
-            if low[j] <= dn:
-                label, mins = -1, j - i
-                break
-        fwd = (close[end] - entry) / entry * 100.0
-        out.append(BarrierOutcome(i, label, fwd, mins))
-    return out
+    a = barrier_arrays(close, high, low, atr_pct, cfg, ts, last_ts)
+    return [
+        BarrierOutcome(i, int(a["label"][i]), float(a["forward_return_pct"][i]),
+                       int(a["minutes_to_barrier"][i]), bool(a["complete"][i]))
+        for i in range(len(a["label"]))
+    ]
