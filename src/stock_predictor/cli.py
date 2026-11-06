@@ -2,7 +2,10 @@
 
     build-features   build the feature frame for one session / prediction point
     train            fit the stage-1 model on the development sessions
+                     (--target 1 --horizon 40: P(touch +1% within 40 minutes))
+    predict          score the session in progress, now, with a trained model
     evaluate         baselines (and the model, if trained) over a prediction point
+    evaluate-target  how often a fixed-target model's top picks reach the target
     backtest         evaluate across purged walk-forward folds
     ablate           measure each candidate screening input (design 4.1)
     params           print the effective parameters
@@ -52,20 +55,57 @@ def _sessions(views: AnalyzerViews, args) -> list[str]:
     from stock_predictor.eval.splits import holdout_split
 
     dev, hold = holdout_split(s, CONFIG.holdout_sessions)
-    chosen = hold if getattr(args, "holdout", False) else dev
+    if getattr(args, "all_sessions", False):
+        chosen = s
+    else:
+        chosen = hold if getattr(args, "holdout", False) else dev
     if getattr(args, "max_sessions", None):
         chosen = chosen[-args.max_sessions :]
     return chosen
 
 
-def _frame_source(views: AnalyzerViews, args, params=None):
+def _frame_source(views: AnalyzerViews, args, params=None, cfg=None, sessions=None):
     """Saved session frames (design: docs/ARCHITECTURE.md), unless
-    --no-frame-cache asks for every frame to be rebuilt and none saved."""
+    --no-frame-cache asks for every frame to be rebuilt and none saved.
+    With ``sessions``, missing frames are built first in --jobs processes."""
     from stock_predictor.data.framestore import FrameStore
     from stock_predictor.models.training import FrameSource
 
     store = None if getattr(args, "no_frame_cache", False) else FrameStore()
-    return FrameSource(views, params or get_params(), store=store)
+    source = FrameSource(views, params or get_params(), cfg, store=store)
+    jobs = getattr(args, "jobs", 1) or 1
+    if sessions and store is not None and jobs > 1:
+        built = source.prefetch(sessions, jobs)
+        if built:
+            print(f"built {built} missing session frames in {jobs} processes")
+    return source
+
+
+def _target_cfg(args):
+    from stock_predictor.models.triple_barrier import TripleBarrierConfig
+
+    if args.stop is not None and args.target is None:
+        raise SystemExit("--stop needs --target")
+    return TripleBarrierConfig(
+        horizon_minutes=args.horizon or 30, target_pct=args.target, stop_pct=args.stop,
+    )
+
+
+def _load_model(name: str):
+    from stock_predictor.models import ModelRegistry
+
+    reg = ModelRegistry()
+    version = name if name != "latest" else reg.latest()
+    if not version:
+        raise SystemExit("no trained model; run `stock-predictor train` first")
+    model, card = reg.load(version)
+    return version, model, card
+
+
+def _card_params(card):
+    from stock_predictor.params import Params
+
+    return Params.from_dict(card.params) if card.params else get_params()
 
 
 def _progress(label: str):
@@ -99,43 +139,85 @@ def cmd_build_features(args) -> int:
 
 
 def cmd_train(args) -> int:
+    from dataclasses import asdict
+
     from stock_predictor.models import (
         ForwardModel, ModelCard, ModelRegistry, backend_name,
         model_version_string, training_set,
     )
 
+    cfg = _target_cfg(args)
     with AnalyzerViews() as views:
         sessions = _sessions(views, args)
         if not sessions:
             print("no sessions to train on", file=sys.stderr)
             return 1
         step = args.minute_step
+        print(f"target: {cfg.describe()}")
         print(f"assembling training set over {len(sessions)} sessions "
               f"({sessions[0]}..{sessions[-1]}), every {'minute' if step == 1 else f'{step} minutes'} ...")
-        source = _frame_source(views, args)
+        source = _frame_source(views, args, cfg=cfg, sessions=sessions)
         ts = training_set(views, sessions, minute_step=step, source=source,
                           progress=_progress("session"))
         print(_frames_line(source))
-    if ts.rows == 0:
-        print("empty training set", file=sys.stderr)
-        return 1
+        if ts.rows == 0:
+            print("empty training set", file=sys.stderr)
+            return 1
+        calibration, calibrator = [], None
+        if cfg.fixed and args.calibrate > 0:
+            calibrator, calibration = _calibrate(ts, source, cfg, args.calibrate)
     cols = ts.feature_names
     model = ForwardModel(feature_names=cols)
     on = get_params().active_features()
     print(f"candidate features on: {', '.join(on) if on else 'none'}")
     print(f"fitting ForwardModel: {ts.rows:,} rows x {len(cols)} features "
-          f"({ts.X.nbytes / 1e6:,.0f} MB), backend={backend_name()}")
+          f"({ts.X.nbytes / 1e6:,.0f} MB), backend={backend_name()}, "
+          f"target hit on {(ts.label_class > 0).mean():.1%} of rows")
     model.fit_matrix(ts.X, ts.label_class, ts.forward_return_pct)
+    model.calibrator = calibrator
 
-    version = model_version_string(backend_name(), sessions[-1])
+    version = model_version_string(backend_name(), sessions[-1], cfg)
     card = ModelCard(
         model_version=version, backend=backend_name(), trained_through=sessions[-1],
         train_sessions=len(ts.sessions), feature_names=cols, params=get_params().to_dict(),
-        minute_step=step,
+        minute_step=step, target=asdict(cfg), calibration=calibration,
     )
     path = ModelRegistry().save(version, model, card)
     print(f"saved {version} -> {path}")
     return 0
+
+
+def _calibrate(ts, source, cfg, last_n: int):
+    """Fit the classifier without the last ``last_n`` sessions, and map its
+    P(target) on those sessions' prediction points to how often it came true.
+    The model saved is then fitted on everything and carries this map."""
+    import numpy as np
+
+    from stock_predictor.eval.target import CALIBRATION_EDGES, default_points, point_rows
+    from stock_predictor.models import GainCalibrator
+    from stock_predictor.models.gbdt import GBDTClassifier
+
+    if len(ts.sessions) < last_n + 20:
+        print(f"too few sessions to calibrate on the last {last_n}; skipped")
+        return None, []
+    cut = len(ts.sessions) - last_n
+    early = ts.row_session < cut
+    print(f"calibrating: fitting on {ts.sessions[0]}..{ts.sessions[cut - 1]}, "
+          f"checking {ts.sessions[cut]}..{ts.sessions[-1]} ...")
+    clf = GBDTClassifier().fit(np.asfortranarray(ts.X[early]), (ts.label_class[early] > 0).astype(int))
+    rows = point_rows(source, ts.sessions[cut:], default_points(cfg))
+    p = np.asarray(clf.predict_proba(rows[ts.feature_names].to_numpy(dtype=np.float64)))
+    hit = (rows["label_class"] > 0).to_numpy(dtype=float)
+    cal = GainCalibrator().fit(p, hit)
+    table = []
+    for lo, hi in zip(CALIBRATION_EDGES, CALIBRATION_EDGES[1:]):
+        m = (p > lo) & (p <= hi) if lo > 0 else (p <= hi)
+        if m.any():
+            table.append({"band": f"{lo:.2f}-{hi:.2f}", "rows": int(m.sum()),
+                          "predicted": float(p[m].mean()), "seen": float(hit[m].mean())})
+    for r in table:
+        print(f"  P {r['band']}: predicted {r['predicted']:.1%}, came true {r['seen']:.1%} ({r['rows']} rows)")
+    return cal, table
 
 
 def cmd_evaluate(args) -> int:
@@ -175,6 +257,105 @@ def cmd_evaluate(args) -> int:
     _print_table(results, _point_label(args), len(sessions), holdout=args.holdout)
     if args.record:
         _record(results, _point_label(args), args.holdout)
+    return 0
+
+
+def cmd_predict(args) -> int:
+    import numpy as np
+
+    from stock_predictor.features.pipeline import build_feature_frame, latest_row_per_symbol
+    from stock_predictor.models import card_target
+
+    version, model, card = _load_model(args.model)
+    cfg = card_target(card)
+    params = _card_params(card)
+    with AnalyzerViews(live=True) as views:
+        session = args.session or views.session_in_progress()
+        day = date.fromisoformat(session)
+        as_of = NSE.epoch_of(day, _clock_time("T1", args.at)) if args.at else views.last_finished_minute(session)
+        if as_of is None:
+            print(f"no candles for {session} yet", file=sys.stderr)
+            return 1
+        frame = build_feature_frame(views, session, as_of, params=params)
+    if frame.empty:
+        print(f"no features for {session} at {NSE.time_of(as_of):%H:%M}", file=sys.stderr)
+        return 1
+    rows = latest_row_per_symbol(frame)
+    pred = model.predict(rows)
+    rows = rows.assign(p=pred.p_up, p50=pred.gain_p50,
+                       vol=rows["atr_14"] / rows["_close"].replace(0, np.nan) * 100)
+    if pred.p_seen is not None:
+        rows["seen"] = pred.p_seen
+    rows["vol_rank"] = rows["vol"].rank(ascending=False, method="first").astype(int)
+    rows = rows.sort_values("p", ascending=False).reset_index(drop=True)
+
+    end = as_of + cfg.horizon_minutes * 60
+    print(f"{version}: {cfg.describe()}")
+    print(f"{session}, last finished candle {NSE.time_of(as_of):%H:%M} IST; "
+          f"window to {NSE.time_of(end):%H:%M}")
+    if end > NSE.session_close_epoch(day) - 60:
+        print("  the window runs past the close: the model was never trained on such rows")
+    head = f"{'':>3} {'symbol':<12} {'price':>10}"
+    if cfg.fixed:
+        head += f" {'target':>10}" + (f" {'stop':>10}" if cfg.stop_pct is not None else "")
+    head += f" {'P(model)':>9}" + (f" {'P(seen)':>8}" if "seen" in rows else "")
+    head += f" {'p50 %':>6} {'vol %':>6} {'vol#':>4}"
+    print(head)
+    for i, r in rows.head(args.n).iterrows():
+        line = f"{i + 1:>3} {r['symbol']:<12} {r['_close']:>10.2f}"
+        if cfg.fixed:
+            line += f" {r['_close'] * (1 + cfg.target_pct / 100):>10.2f}"
+            if cfg.stop_pct is not None:
+                line += f" {r['_close'] * (1 - cfg.stop_pct / 100):>10.2f}"
+        line += f" {r['p']:>9.1%}" + (f" {r['seen']:>8.1%}" if "seen" in rows else "")
+        line += f" {r['p50']:>+6.2f} {r['vol']:>6.3f} {r['vol_rank']:>4}"
+        print(line)
+    print("P(model): the model's probability. P(seen): how often that probability came true on "
+          "sessions it had not trained on.\nvol %: 14-minute ATR as % of price; vol#: its rank "
+          "(most volatile first) -- the simple screen `evaluate-target` compares against.")
+    if args.csv:
+        rows.assign(as_of=as_of, model_version=version).to_csv(args.csv, index=False)
+    return 0
+
+
+def cmd_evaluate_target(args) -> int:
+    from stock_predictor.eval.target import evaluate_target
+    from stock_predictor.models import card_target
+
+    version, model, card = _load_model(args.model)
+    cfg = card_target(card)
+    if not cfg.fixed:
+        print(f"{version} was not trained on a fixed target (train --target)", file=sys.stderr)
+        return 1
+    with AnalyzerViews() as views:
+        sessions = _sessions(views, args)
+        seen = [s for s in sessions if s <= card.trained_through]
+        if seen:
+            print(f"warning: {len(seen)} of these sessions are on or before {card.trained_through}, "
+                  "which the model was trained through: in-sample")
+        source = _frame_source(views, args, _card_params(card), cfg, sessions)
+        rep = evaluate_target(model, source, sessions, n=args.n)
+        print(_frames_line(source))
+
+    import pandas as pd
+
+    t = rep.by_point
+    print(f"\n{version}: {cfg.describe()}; top {rep.n} at each point over {len(rep.sessions)} sessions "
+          f"({rep.sessions[0]}..{rep.sessions[-1]}); costs {rep.cost_pct:.3f}%")
+    cols = ["point", "base_hit", "model_hit", "intraday_volatility_hit", "highest_volatility_hit",
+            "model_p", "model_net", "intraday_volatility_net", "highest_volatility_net"]
+    if cfg.stop_pct is not None:
+        cols.insert(5, "model_stopped")
+    with pd.option_context("display.width", 200, "display.max_columns", 20):
+        print(t[cols].to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+        print("\ncalibration, every symbol at every point:")
+        print(rep.calibration.to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+    print("\n" + json.dumps(rep.summary, indent=1))
+    if args.csv:
+        t.to_csv(args.csv, index=False)
+    if args.json:
+        with open(args.json, "w") as fh:
+            json.dump(rep.to_dict(), fh, indent=1)
     return 0
 
 
@@ -291,7 +472,8 @@ def cmd_serve(args) -> int:
     from stock_predictor.serving.scheduler import Scheduler
     from stock_predictor.serving.service import PredictorService
 
-    svc = PredictorService()
+    # live: today's candles come from v_intraday_merged while the session runs
+    svc = PredictorService(views=AnalyzerViews(live=True))
     if args.model:
         from stock_predictor.models import ModelRegistry
 
@@ -384,10 +566,45 @@ def build_parser() -> argparse.ArgumentParser:
     bf.add_argument("--out", help="write the frame to .csv or .parquet")
     bf.set_defaults(func=cmd_build_features)
 
+    from stock_predictor.models.training import default_jobs
+
+    jobs_help = f"processes for building missing frames (default {default_jobs()})"
+
     tr = sub.add_parser("train", parents=[common], help="fit the stage-1 model")
     tr.add_argument("--minute-step", type=int, default=1, metavar="K",
                     help="train on every K-th minute after the open (default 1: every minute)")
+    tr.add_argument("--horizon", type=int, metavar="MIN",
+                    help="label window in minutes (default 30)")
+    tr.add_argument("--target", type=float, metavar="PCT",
+                    help="fixed target: label = price touches +PCT%% within the horizon "
+                         "(default: ATR-scaled barriers)")
+    tr.add_argument("--stop", type=float, metavar="PCT",
+                    help="with --target: the target must come before -PCT%%")
+    tr.add_argument("--calibrate", type=int, default=20, metavar="N",
+                    help="with --target: map P to the rate seen on the last N sessions, "
+                         "fitted without them (default 20; 0 = off)")
+    tr.add_argument("--all-sessions", action="store_true",
+                    help="train on the held-out sessions too (for the model you use live, "
+                         "after evaluating one trained without them)")
+    tr.add_argument("--jobs", type=int, default=default_jobs(), help=jobs_help)
     tr.set_defaults(func=cmd_train)
+
+    pr = sub.add_parser("predict", help="score the session in progress with a trained model")
+    pr.add_argument("--model", default="latest", help="'latest' or a version")
+    pr.add_argument("--session", help="a past session instead of today's (YYYY-MM-DD)")
+    pr.add_argument("--at", help="HH:MM (default: the latest finished candle)")
+    pr.add_argument("-n", type=int, default=15, help="rows to show (default 15)")
+    pr.add_argument("--csv", help="also write every symbol's row")
+    pr.set_defaults(func=cmd_predict)
+
+    et = sub.add_parser("evaluate-target", parents=[common],
+                        help="how often a fixed-target model's top picks reach the target")
+    et.add_argument("--model", default="latest", help="'latest' or a version")
+    et.add_argument("-n", type=int, default=5, help="picks per point (default 5)")
+    et.add_argument("--jobs", type=int, default=default_jobs(), help=jobs_help)
+    et.add_argument("--csv", help="write the per-point table")
+    et.add_argument("--json", help="write the summary")
+    et.set_defaults(func=cmd_evaluate_target)
 
     ev = sub.add_parser("evaluate", parents=[common], help="baselines + model at a prediction point")
     ev.add_argument("--point", default="T1", choices=["T0", "T1", "Tn"])

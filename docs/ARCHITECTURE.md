@@ -31,7 +31,7 @@ flowchart TB
     end
 
     subgraph MODELS["Models"]
-      trainset["models/training.py<br/>FrameSource · training_set<br/>triple-barrier labels"]
+      trainset["models/training.py<br/>FrameSource · training_set<br/>labels attached on load"]
       fstore["data/framestore.py<br/>keyed by feature set,<br/>code and data"]
       stage1["Stage 1 · models/<br/>forward · gbdt"]
       registry["models/registry.py"]
@@ -57,7 +57,7 @@ flowchart TB
   client(["API consumers"])
 
   ingest -->|"writes"| adb
-  adb -->|"six views + hot_window"| reader
+  adb -->|"seven views + hot_window"| reader
   reader --> feats
   reader --> labels
   toml --> params
@@ -97,12 +97,21 @@ How to read it:
   views (`v_intraday_candles`, `v_daily_candles`, `v_opportunity_markers`,
   `v_symbol_trend`, `v_market_breadth`, `v_symbol_beta`) and one base table,
   `hot_window`, for the time-of-day baseline.
+- **The session in progress comes from a seventh view.** stock-analyzer writes
+  a day's candles to `v_intraday_candles` only after the close. During the
+  session its daemon records each finished minute in `live_candle`, which
+  `v_intraday_merged` combines with the finished sessions. `serve` and
+  `predict` open the views with `live=True`, which reads today from that view
+  and leaves out the candle still forming. Everything else a feature needs
+  comes from sessions before today.
 - **Completed sessions go through saved frames.** `models/training.py` reads
-  each completed session's labelled frame from `data/frames/`. If a frame is
-  missing or out of date, it builds the frame and saves it. `train` turns
-  the frames into one matrix. `evaluate --model` and `ablate --model` cut them
-  back to their prediction point. The session in progress never touches the
-  store; serving builds its frame fresh at each point.
+  each completed session's feature frame from `data/frames/`. If a frame is
+  missing or out of date, it builds the frame and saves it (`--jobs`
+  processes at once). Labels for the target being trained are attached on
+  load, from the session's full minute candles. `train` turns the frames into
+  one matrix. `evaluate --model`, `evaluate-target` and `ablate --model` cut
+  them back to their prediction point. The session in progress never touches
+  the store; serving builds its frame fresh at each point.
 - **Dashed boxes** are either outside this repo or not doing anything yet.
   `fundamentals/` and `news/` return nothing. stock-analyzer's signal client is
   switched off (`model.enabled=false` in its `application.properties`).
@@ -117,8 +126,8 @@ How to read it:
 |---|---|---|---|---|
 | **stock-analyzer database** | `../stock-analyzer/data/stock-analyzer.db` (`STOCK_ANALYZER_DB`) | stock-analyzer only | Minute candles, daily bars, opportunity labels, live session state | 172 MB, plus 15 MB of uncheckpointed WAL during today's session |
 | **stock-predictor database** | `data/stock-predictor.db` (`STOCK_PREDICTOR_DB`) | `serve`, `score`, `evaluate --record` | Tables `prediction`, `intraday_signal`, `metric_run` | Does not exist yet: nothing has run `serve` |
-| **Saved training frames** | `data/frames/<feature set>/` (`STOCK_PREDICTOR_FRAMES`) | `train`, `evaluate --model`, `ablate --model` | Each completed session's labelled feature frame, as Parquet | Empty until the first `train`. About 7 MB per session, so ~0.8 GB for 108 sessions |
-| **Model artefacts** | `artifacts/<version>/` (`STOCK_PREDICTOR_ARTIFACTS`) | `train` | `model.pkl` (pickled trees) and `card.json` (features, params, minute step, holdout metrics) | Empty. One model is 2.7 MB |
+| **Saved training frames** | `data/frames/<feature set>/` (`STOCK_PREDICTOR_FRAMES`) | `train`, `evaluate --model`, `evaluate-target`, `ablate --model` | Each completed session's feature frame, as Parquet. No labels: every target shares them | About 7 MB per session, so ~0.8 GB for 109 sessions |
+| **Model artefacts** | `artifacts/<version>/` (`STOCK_PREDICTOR_ARTIFACTS`) | `train` | `model.pkl` (pickled trees) and `card.json` (features, params, minute step, target, calibration) | One model is 2.7 MB |
 | **Prediction cache** | Memory of the `serve` process | The scheduler | The latest ranking only | Under 1 KB |
 | **Training matrix** | Memory of `train` | `train` | One float64 matrix of features, plus labels | See section 4 |
 | **Parameters** | `params.example.toml` or your own file (`STOCK_PREDICTOR_PARAMS`) | You | Candidate-input switches (DESIGN 4.1) | — |
@@ -242,9 +251,51 @@ row. Both are now computed per row. Beta is now computed point-in-time as
 well (DESIGN section 4). Any model trained before this change learned from
 the leaked values and should be retrained.
 
+## 5. Changes made on 2026-11-06
+
+Training a model for a fixed target (+1% within 40 minutes) and running it on
+the live session turned up three problems with reading the session in
+progress, and one with labels:
+
+- **Reading during market hours could fail.** The connection was opened with
+  `immutable=1`, which tells SQLite the file never changes. While
+  stock-analyzer's daemon is writing, that returns stale pages. A long read
+  (an evaluation over 108 sessions) failed with "database disk image is
+  malformed" twice at 14:30 today. The connection is now plain read-only.
+- **`serve` never used its model during a session.** Today's candles reach
+  `v_intraday_candles` only after the close, so every recompute at 09:30 to
+  15:00 found no features and silently served the `highest_volatility`
+  baseline instead. `serve` now reads the session in progress from
+  `v_intraday_merged` (section 1).
+- **Labels stopped at 15:00.** Frames run to the last prediction point, and
+  labels were computed from the frame's own candles, so a 14:45 row's window
+  ended at 15:00, not 15:15. Labels are now attached from the session's full
+  candles, and a row whose window runs past 15:29 is not trained on. Windows
+  are measured in clock minutes, so a minute with no trades no longer
+  stretches a window. When one candle reaches both barriers, the row now
+  counts as stopped, because the order inside the candle is unknown.
+- **The newest live minute is usually partial.** stock-analyzer writes the
+  session a symbol at a time, and polls two symbols more often than the rest.
+  At 14:45 the newest finished minute (14:44) held 2 of 62 symbols, so
+  predicting "now" ranked those 2 against each other in the cross-sectional
+  features. `predict` now uses the latest minute at least 90% of symbols have
+  finished, which runs about 3 minutes behind the clock.
+- **A new target rebuilt every frame.** Labels were saved inside the frames,
+  and a different target meant 13 minutes of rebuilding. Frames now hold
+  features only, and a missing frame is built in `--jobs` processes: 109
+  sessions in about 2 minutes on 5.
+
 ---
 
-## 5. Still open
+## 6. Still open
+
+- **The scheduler can hit a partial minute too.** `serve` recomputes at fixed
+  points (09:30, 09:45, ...). A recompute that fires before stock-analyzer has
+  written that minute for most symbols builds the cross-section from the
+  symbols it has. It should wait for the minute, as `predict` does.
+- **The +1% / 40-minute model is overconfident above about 20%** and does not
+  beat ranking by current volatility (README). `predict` shows the calibrated
+  figure; the model itself has not been tuned.
 
 - **Disk for saved frames.** About 7 MB per session per feature set, so
   ~0.8 GB today and about 1.8 GB more each year. Delete

@@ -79,6 +79,12 @@ stock-predictor ablate                              # measure every input at 09:
 stock-predictor --set rsi.filter=true evaluate --at 09:45
 stock-predictor --params my-params.toml train       # train with chosen inputs as features
 
+# A fixed target: P(the price touches +1% within the next 40 minutes)
+stock-predictor train --target 1 --horizon 40 --minute-step 3       # development sessions
+stock-predictor evaluate-target --holdout --model <that version>    # top 5 vs simple screens
+stock-predictor train --target 1 --horizon 40 --minute-step 3 --all-sessions   # to use live
+stock-predictor predict                                             # every symbol, right now
+
 # Phase 6 — serving
 stock-predictor serve --model latest --port 8001
 stock-predictor score --today 2026-09-03            # fill realised gains on past predictions
@@ -120,18 +126,53 @@ next-day moves, most showed no reliable effect. `stock-predictor ablate`
 measures each one on this project's target before anything is switched on.
 Design §4.1 has the current numbers.
 
+### A fixed target: +1% within 40 minutes
+
+`train --target 1 --horizon 40` trains stage 1 on a plain question asked of
+every minute: from this candle's close, does the price touch +1% within the
+next 40 minutes? (`--stop 0.5` would require it before a 0.5% fall.)
+`predict` then answers it for every symbol in the session in progress, from
+stock-analyzer's live candles, in about 8 s. It shows the model's probability
+next to how often that probability came true on the 20 sessions held back
+from a calibration fit. It also shows each symbol's current volatility rank,
+because that ranking is the one to beat.
+
+Measured on the held-out month (21 sessions, 2026-10-07..11-05), with a model
+trained on the 88 sessions before it, every 15 minutes from 09:30 to 14:45:
+
+| Top 5 at each point, by | Touched +1% within 40 min | Net per trade |
+|---|---|---|
+| — (every symbol: the base rate) | 5.5% | −0.08% |
+| the model's P(target) | 18.3% | −0.06% |
+| volatility right now (14-minute ATR as % of price) | **21.4%** | −0.05% |
+| widest 20-day ATR (`highest_volatility`) | 20.0% | −0.07% |
+
+Net per trade: buy at the close, sell at +1% or after 40 minutes, less
+0.083% costs.
+
+The model finds stocks about 3.3 times as likely as average to make the move,
+but no better than ranking by current volatility, which needs no model.
+Nothing in the table makes money after costs. Its probabilities are too high
+above ~20%: on sessions it had not trained on, a predicted 40–60% came true
+about 20–23% of the time. `predict` therefore shows the calibrated figure too.
+The 20 development sessions before the held-out month gave the same ordering
+(18.0% vs 21.9%).
+
 ### Saved training frames
 
-Building one session's labelled feature frame from stock-analyzer's views
-takes about 7 s. `train` saves each completed session's frame as Parquet under
+Building one session's feature frame from stock-analyzer's views takes about
+7 s. `train` saves each completed session's frame as Parquet under
 `data/frames/` (`STOCK_PREDICTOR_FRAMES`) and reads it back next time in about
-0.04 s. `evaluate --model` and `ablate --model` cut the same frames back to
-their prediction point instead of rebuilding. A frame is rebuilt automatically
-when the code that builds it changes, when stock-analyzer rewrites that
-session or an earlier one, or when a different set of candidate features is
-switched on (each set has its own folder). `--no-frame-cache` builds everything
-and saves nothing. A session costs about 7 MB on disk; delete the folder to
-reclaim it. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the measurements.
+0.04 s; missing frames are built in `--jobs` processes. Frames hold features
+only. Labels for the target being trained are attached on load, so a new
+target or horizon reuses them. `evaluate --model`, `evaluate-target` and
+`ablate --model` cut the same frames back to their prediction point instead of
+rebuilding. A frame is rebuilt automatically when the code that builds it
+changes, when stock-analyzer rewrites that session or an earlier one, or when a
+different set of candidate features is switched on (each set has its own
+folder). `--no-frame-cache` builds everything and saves nothing. A session
+costs about 7 MB on disk; delete the folder to reclaim it.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the measurements.
 
 ### API
 
@@ -163,19 +204,21 @@ src/stock_predictor/
 │                    + candidate inputs (point-in-time)
 ├── fundamentals/    FundamentalScore protocol + null / CSV implementations
 ├── news/            NewsSentiment protocol + null implementation
-├── models/          triple-barrier labels, GBDT backend, stage-1 forward model,
-│                    stage-2 deterministic aggregation, calibration, registry,
-│                    training set (saved frames, column-major matrix, minute step)
+├── models/          triple-barrier labels (ATR-scaled or a fixed target), GBDT backend,
+│                    stage-1 forward model, stage-2 deterministic aggregation,
+│                    calibration, registry, training set (saved frames, labels attached
+│                    on load, column-major matrix, minute step)
 ├── eval/            charges, purged walk-forward splitter, 4 baselines, metrics, backtest,
-│                    ablation of candidate inputs
+│                    ablation of candidate inputs, fixed-target hit rates
 ├── serving/         in-memory cache, recompute scheduler, FastAPI app
-└── cli.py           build-features | train | evaluate | backtest | ablate | params | frames
-                     | serve | score
+└── cli.py           build-features | train | predict | evaluate | evaluate-target | backtest
+                     | ablate | params | frames | serve | score
 
 tests/               leakage, targets, splits, metrics, charges, baselines,
                      feature parity (vs stock-analyzer's pinned fixture), aggregation, API,
                      candidate inputs (params, point-in-time values, filters, ablation),
-                     storage (signals written once, saved frames, rows independent of build time)
+                     storage (signals written once, saved frames, rows independent of build time),
+                     fixed targets (labels, clock-minute windows, live session, versions)
 ```
 
 ## Status by phase (design §9)
@@ -216,5 +259,5 @@ tests/               leakage, targets, splits, metrics, charges, baselines,
 ## Tests
 
 ```bash
-pytest -q          # 65 tests; those needing stock-analyzer's DB skip cleanly without it
+pytest -q          # 74 tests; those needing stock-analyzer's DB skip cleanly without it
 ```

@@ -89,14 +89,15 @@ def test_rewriting_a_session_invalidates_it_and_every_later_one():
     assert data_fingerprints(_DigestViews(candles, daily))["2026-01-02"] == after["2026-01-02"]
 
 
-def test_variant_follows_feature_switches_not_filters():
-    cfg = TripleBarrierConfig()
-    base = variant_key(frame_variant(Params(), cfg))
-    assert variant_key(frame_variant(Params().with_overrides({"rsi.filter": True, "rsi.min": 40.0}), cfg)) == base
-    assert variant_key(frame_variant(Params().with_overrides({"rsi.feature": True}), cfg)) != base
+def test_variant_follows_feature_switches_not_filters_or_the_target():
+    base = variant_key(frame_variant(Params()))
+    assert variant_key(frame_variant(Params().with_overrides({"rsi.filter": True, "rsi.min": 40.0}))) == base
+    assert variant_key(frame_variant(Params().with_overrides({"rsi.feature": True}))) != base
     on = Params().with_overrides({"rsi.feature": True})
-    assert variant_key(frame_variant(on.with_overrides({"rsi.period": 7}), cfg)) != variant_key(frame_variant(on, cfg))
-    assert variant_key(frame_variant(Params(), TripleBarrierConfig(horizon_minutes=15))) != base
+    assert variant_key(frame_variant(on.with_overrides({"rsi.period": 7}))) != variant_key(frame_variant(on))
+    # labels are attached on load, so every target shares the saved frames
+    assert FrameSource(None, Params(), TripleBarrierConfig(horizon_minutes=40, target_pct=1.0))._variant \
+        == FrameSource(None, Params())._variant == base
     assert code_fingerprint() == code_fingerprint()
 
 
@@ -149,7 +150,7 @@ def test_point_in_time_beta_is_the_view_restricted_to_the_past(views, sessions):
 
 @pytest.fixture(scope="module")
 def saved(views, sessions, tmp_path_factory):
-    """One session's frame, built once and saved to a scratch store."""
+    """One session's labelled frame, built once and saved to a scratch store."""
     params = Params().with_overrides({"opening_check.feature": True})
     store = FrameStore(tmp_path_factory.mktemp("frames"))
     sd = sessions[-3]
@@ -163,6 +164,8 @@ def test_saved_frame_reads_back_unchanged(views, saved):
     again = FrameSource(views, params, store=store)
     pd.testing.assert_frame_equal(again.session(sd), built, check_exact=True)
     assert (again.loaded, again.built) == (1, 0)
+    assert not any(c in pd.read_parquet(next(store.root.rglob(f"{sd}.*.parquet"))).columns
+                   for c in ("label_class", "label_complete"))  # labels are not saved
 
 
 @requires_analyzer
@@ -186,12 +189,15 @@ def test_training_set_is_the_frame_as_a_matrix(views, saved):
     ts = training_set(views, [sd], source=source)
     names = model_feature_columns(built)
     assert ts.feature_names == names
-    np.testing.assert_array_equal(ts.X, built[names].to_numpy(dtype=float))
-    np.testing.assert_array_equal(ts.label_class, built["label_class"].to_numpy())
+    complete = built[built.label_complete]  # windows that end before the close
+    assert 0 < len(built) - len(complete) < len(built) * 0.01
+    np.testing.assert_array_equal(ts.X, complete[names].to_numpy(dtype=float))
+    np.testing.assert_array_equal(ts.label_class, complete["label_class"].to_numpy())
+    assert (ts.row_session == 0).all()
     pd.testing.assert_frame_equal(training_frame(views, [sd], source=source), built)
 
     step = training_set(views, [sd], minute_step=5, source=source)
     assert ts.rows / 5.5 < step.rows < ts.rows / 4.5
     open_epoch = NSE.session_open_epoch(date.fromisoformat(sd))
-    kept = built[((built.ts_epoch - open_epoch) // 60) % 5 == 0]
+    kept = complete[((complete.ts_epoch - open_epoch) // 60) % 5 == 0]
     np.testing.assert_array_equal(step.X, kept[names].to_numpy(dtype=float))

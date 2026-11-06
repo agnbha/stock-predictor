@@ -309,6 +309,15 @@ so they mean the same thing in calm and volatile conditions. This is the same
 labelling stock-analyzer's model contract already describes, so the two share a
 definition rather than inventing separate ones.
 
+The label can instead be a fixed target, a plain question asked of every
+minute: does the price touch +1% within the next 40 minutes (`train --target 1
+--horizon 40`), optionally before it falls by `--stop`%? A fixed target is
+mechanically easier for a volatile stock, so the ranking to beat is "the most
+volatile stocks right now", which needs no model. `evaluate-target` measures
+the model's top picks against it at every 15-minute point. Windows are clock
+minutes read from the session's full candles, and a minute whose window would
+run past 15:29 is not trained on.
+
 This stage sees over a million examples. It is where any real signal will be
 found, and it is trained without ever knowing what a "top five" is.
 
