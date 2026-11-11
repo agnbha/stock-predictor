@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stock-predictor · live board</title>
+<style>
+.viz-root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface-1: #fcfcfb;
+  --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+  --series-1: #2a78d6; --neg: #e34948; --deemph: #c3c2b7; --wash: rgba(42,120,214,0.08);
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --good-text: #006300;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface-1: #1a1a19;
+    --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+    --series-1: #3987e5; --neg: #e66767; --deemph: #5a5a56; --wash: rgba(57,135,229,0.12);
+    --good-text: #0ca30c;
+  }
+}
+:root[data-theme="dark"] .viz-root {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface-1: #1a1a19;
+  --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+  --series-1: #3987e5; --neg: #e66767; --deemph: #5a5a56; --wash: rgba(57,135,229,0.12);
+  --good-text: #0ca30c;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+.viz-root {
+  min-height: 100vh; background: var(--page); color: var(--text-primary);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding: 20px 24px 48px;
+}
+h1 { font-size: 20px; font-weight: 600; margin: 0; }
+h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+.sub { color: var(--text-secondary); }
+.muted { color: var(--text-muted); }
+.small { font-size: 12px; }
+header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+header .meta { color: var(--text-secondary); margin-top: 4px; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+button.ghost { font: inherit; color: var(--text-secondary); background: none; border: 1px solid var(--ring);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button.ghost:hover { background: var(--wash); }
+.card { background: var(--surface-1); border: 1px solid var(--ring); border-radius: 10px; padding: 16px; }
+.grid { display: grid; gap: 16px; }
+.kpis { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); margin-bottom: 16px; }
+.tile .label { color: var(--text-secondary); font-size: 13px; }
+.tile .value { font-size: 26px; font-weight: 600; margin: 2px 0; }
+.tile .note { color: var(--text-secondary); font-size: 12px; }
+.main { grid-template-columns: minmax(0, 2.2fr) minmax(300px, 1fr); align-items: start; }
+@media (max-width: 1100px) { .main { grid-template-columns: 1fr; } }
+.section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+.banner { border-left: 3px solid var(--warning); padding: 8px 12px; margin-bottom: 16px; background: var(--surface-1);
+  border-radius: 6px; color: var(--text-secondary); }
+table { border-collapse: collapse; width: 100%; }
+th { text-align: left; font-weight: 500; color: var(--text-muted); font-size: 12px; padding: 6px 8px;
+  border-bottom: 1px solid var(--axis); white-space: nowrap; }
+td { padding: 7px 8px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.pick { cursor: pointer; }
+tr.pick:hover, tr.pick:focus { background: var(--wash); outline: none; }
+tr.pick:focus-visible { box-shadow: inset 2px 0 0 var(--series-1); }
+.sym { font-weight: 600; }
+.chance { display: flex; align-items: center; gap: 8px; min-width: 130px; }
+.meter { position: relative; height: 8px; flex: 1; background: var(--grid); border-radius: 4px; }
+.meter > span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--deemph); }
+tr.top .meter > span { background: var(--series-1); }
+.chance b { font-weight: 600; min-width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
+.chips { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; }
+td.symcell { min-width: 190px; max-width: 260px; }
+.chip { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--ring); color: var(--text-secondary); white-space: nowrap; }
+.chip.on { border-color: var(--series-1); color: var(--text-primary); }
+.details td { background: var(--page); padding: 14px 16px 18px; }
+.dgrid { display: grid; grid-template-columns: minmax(200px, 0.9fr) minmax(300px, 1.4fr) minmax(240px, 1fr); gap: 20px; }
+@media (max-width: 1300px) { .dgrid { grid-template-columns: 1fr 1fr; } }
+.dconc { margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--grid); }
+.details h3 { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin: 0 0 6px; }
+.kv { display: grid; grid-template-columns: minmax(84px, max-content) 1fr; gap: 3px 12px; font-size: 13px; }
+.kv dt { color: var(--text-muted); }
+.kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+.conclusion { margin: 0; padding-left: 18px; }
+.conclusion li { margin-bottom: 4px; }
+.drv { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(120px, 1.2fr) 76px; gap: 6px 10px; align-items: center; font-size: 13px; }
+.dbar { position: relative; height: 8px; }
+.dbar::before { content: ""; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: var(--axis); }
+.dbar > span { position: absolute; top: 0; bottom: 0; }
+.dbar > span.up { left: 50%; background: var(--series-1); border-radius: 0 4px 4px 0; }
+.dbar > span.down { right: 50%; background: var(--neg); border-radius: 4px 0 0 4px; }
+.status { display: inline-flex; align-items: center; gap: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.good { background: var(--good); } .dot.warning { background: var(--warning); }
+.dot.serious { background: var(--serious); } .dot.critical { background: var(--critical); }
+.dot.idle { background: var(--text-muted); }
+.syms { display: flex; flex-wrap: wrap; gap: 4px; }
+.syms span { font-size: 11px; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--ring); color: var(--text-secondary); }
+.syms span.late { border-color: var(--warning); color: var(--text-primary); }
+.stack > * + * { margin-top: 16px; }
+.empty { color: var(--text-muted); padding: 10px 0; }
+#tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface-1); border: 1px solid var(--ring);
+  border-radius: 6px; padding: 6px 9px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.12); display: none; max-width: 320px; }
+#tip b { font-weight: 600; }
+.loading { opacity: .6; transition: opacity .2s; }
+.right { text-align: right; }
+.link { color: var(--series-1); cursor: pointer; background: none; border: none; font: inherit; padding: 0; }
+code { font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="viz-root" id="root">
+  <header>
+    <div>
+      <h1>Likely to touch the target, now</h1>
+      <div class="meta" id="meta"><span class="muted">loading…</span></div>
+    </div>
+    <div style="display:flex; gap:8px">
+      <button class="ghost" id="theme" type="button" aria-label="Switch light or dark">Theme</button>
+      <button class="ghost" id="reload" type="button">Refresh</button>
+    </div>
+  </header>
+  <div id="banner"></div>
+  <section class="grid kpis" id="kpis" aria-label="Headline figures"></section>
+  <div class="grid main">
+    <div class="stack">
+      <section class="card" aria-labelledby="h-cand">
+        <div class="section-head">
+          <div><h2 id="h-cand">Every symbol, most likely first</h2>
+            <div class="sub small" id="cand-sub"></div></div>
+          <button class="link small" id="toggle-all" type="button"></button>
+        </div>
+        <div style="overflow-x:auto"><table id="cand"></table></div>
+        <div class="muted small" style="margin-top:8px">Select a row for its confidence, what moved it, its screener data and the conclusion.
+          Bars: chance it comes true, 0–50% scale; blue marks the model's top five.</div>
+      </section>
+      <section class="card" aria-labelledby="h-evid">
+        <h2 id="h-evid">Screener evidence</h2>
+        <div class="sub small" id="evid-sub" style="margin-bottom:8px"></div>
+        <div style="overflow-x:auto"><table id="evid"></table></div>
+      </section>
+      <section class="card" aria-labelledby="h-req">
+        <h2 id="h-req">What stock-analyzer is requesting</h2>
+        <div class="sub small" id="req-sub" style="margin-bottom:10px"></div>
+        <div id="req"></div>
+      </section>
+    </div>
+    <div class="stack">
+      <section class="card" aria-labelledby="h-model">
+        <h2 id="h-model">How the numbers are made</h2>
+        <div id="model"></div>
+      </section>
+      <section class="card" aria-labelledby="h-vol">
+        <h2 id="h-vol">Most volatile right now</h2>
+        <div class="sub small" style="margin-bottom:8px">14-minute ATR as % of price: the simple screen the model is measured against.</div>
+        <div id="vol"></div>
+      </section>
+      <section class="card" aria-labelledby="h-rank">
+        <h2 id="h-rank">Today's top windows</h2>
+        <div class="sub small" style="margin-bottom:8px">The scheduler's ranking (design: five best windows still open after T).</div>
+        <div id="rank"></div>
+      </section>
+      <section class="card" aria-labelledby="h-poll">
+        <h2 id="h-poll">stock-analyzer's monitor</h2>
+        <div id="poll"></div>
+      </section>
+    </div>
+  </div>
+</div>
+<div id="tip" role="tooltip"></div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === "class") e.className = v;
+    else if (k === "text") e.textContent = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) if (k != null) e.append(k instanceof Node ? k : document.createTextNode(String(k)));
+  return e;
+};
+const IST = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false });
+const ISTs = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+const hm = (e) => e ? IST.format(new Date(e * 1000)) : "–";
+const hms = (e) => e ? ISTs.format(new Date(e * 1000)) : "–";
+const pct = (x, d = 0) => x == null ? "–" : (x * 100).toFixed(d) + "%";
+const pp = (x, d = 2) => x == null ? "–" : (x >= 0 ? "+" : "") + x.toFixed(d) + "%";
+const num = (x, d = 2) => x == null ? "–" : Number(x).toLocaleString("en-IN", { maximumFractionDigits: d, minimumFractionDigits: d });
+const status = (kind, label) => el("span", { class: "status" }, el("span", { class: "dot " + kind, "aria-hidden": "true" }),
+  el("span", { text: ({ good: "✓ ", warning: "! ", serious: "! ", critical: "✕ ", idle: "· " }[kind] || "") + label }));
+
+let data = null, showAll = false;
+const open = new Set();
+// #open=SYM1,SYM2 opens those rows; ?theme=dark|light picks the theme
+for (const part of location.hash.slice(1).split("&")) {
+  const [k, v] = part.split("=");
+  if (k === "open" && v) decodeURIComponent(v).split(",").forEach((x) => open.add(x.toUpperCase()));
+}
+const qTheme = new URLSearchParams(location.search).get("theme");
+if (qTheme === "dark" || qTheme === "light") document.documentElement.dataset.theme = qTheme;
+
+// tooltip: enhances; every value it shows is also in the row or its details
+const tip = $("tip");
+function showTip(ev, lines) {
+  tip.replaceChildren(...lines.map(([v, l]) => el("div", {}, el("b", { text: v }), " ", el("span", { class: "muted", text: l }))));
+  tip.style.display = "block";
+  const r = (ev.currentTarget || ev.target).getBoundingClientRect();
+  const x = ev.clientX ?? (r.left + r.width / 2), y = ev.clientY ?? r.top;
+  tip.style.left = Math.min(x + 14, innerWidth - tip.offsetWidth - 8) + "px";
+  tip.style.top = Math.max(8, y - tip.offsetHeight - 10) + "px";
+}
+const hideTip = () => { tip.style.display = "none"; };
+
+function kpi(label, value, note) {
+  return el("div", { class: "card tile" }, el("div", { class: "label", text: label }),
+    el("div", { class: "value", text: value }), el("div", { class: "note" }, note));
+}
+
+function render() {
+  const d = data, m = d.market || {}, mod = d.model, c = d.candidates || [];
+  // header
+  const stateKind = m.state === "open" ? "good" : "idle";
+  $("meta").replaceChildren(
+    status(stateKind, `${m.session || ""} · market ${m.state || "?"}`),
+    el("span", { text: m.as_of ? `predicting from ${hm(m.as_of)} → ${hm(m.window_end)}` : "no prediction yet" }),
+    el("span", { class: "muted", text: m.lag_seconds != null && m.state === "open" ? `data ${Math.max(0, Math.round(m.lag_seconds / 60))} min behind the clock` : "" }),
+    el("span", { class: "muted", text: `refreshed ${hms(d.refreshed_at)}` }));
+  const notes = [];
+  if (d.status && d.status !== "ok") notes.push(d.status);
+  if (m.held) notes.push(`A ${mod ? mod.target_cfg.horizon_minutes : 40}-minute window starting after ${hm(m.as_of)} would run past the 15:29 candle, and the model was never trained on those, so the board holds ${hm(m.as_of)}.`);
+  $("banner").replaceChildren(...notes.map((n) => el("div", { class: "banner", role: "status", text: n })));
+
+  // KPIs
+  const top = c[0], ev = mod && mod.evaluation && mod.evaluation.summary;
+  const tiles = [];
+  tiles.push(kpi("Most likely now", top ? top.symbol : "–",
+    top ? `${pct(top.p_seen ?? top.p_model)} chance of ${num(top.target_price)} by ${hm(m.window_end)}` : "waiting for candles"));
+  tiles.push(kpi("Model's top 5, held out", ev ? pct(ev.model.hit) : "–",
+    ev ? `touched the target; most volatile 5: ${pct(ev.intraday_volatility.hit)}, any stock ${pct(ev.base_hit, 1)}` : "run evaluate-target --holdout --record"));
+  const a = d.analyzer || {}, hb = a.heartbeat;
+  const hbAge = hb ? (d.refreshed_at - hb.last_tick_epoch) : null;
+  const pollS = (a.config && a.config.poll_seconds) || 150;
+  const hbKind = !hb ? "idle" : hb.degraded ? "warning" : hbAge > pollS * 2.5 ? (m.state === "open" ? "serious" : "idle") : "good";
+  tiles.push(kpi("stock-analyzer polls", hb ? String(hb.symbols_tracked) + " symbols" : "–",
+    status(hbKind, hb ? `${hb.degraded ? "degraded" : hb.note || "ok"}, last poll ${hm(hb.last_tick_epoch)}` : "no heartbeat")));
+  const r = d.requests || {};
+  tiles.push(kpi("Requests to this service", String(r.total || 0),
+    a.config && a.config.found ? (a.config.model_enabled ? `from ${r.symbols || 0} symbols since ${hm(r.since)}` : "its model client is off (model.enabled=false)") : `since ${hm(r.since)}`));
+  $("kpis").replaceChildren(...tiles);
+
+  renderCandidates(c, mod);
+  renderEvidence(d.evidence);
+  renderModel(mod);
+  renderVol(d.volatility_top || [], c);
+  renderRanking(d.ranking);
+  renderRequests(d.requests || {}, a);
+  renderPoll(a, m);
+  $("root").classList.remove("loading");
+}
+
+function chips(s) {
+  const g = (s && s.groups) || {}, out = [];
+  const cs = s && s.canslim, b = s && s.bullish, w = s && s.watchlist;
+  if (b) out.push(el("span", { class: "chip" + (g.bullish_top_fifth ? " on" : ""), text: `bullish #${b.rank ?? "?"}/${b.of}` }));
+  if (w) out.push(el("span", { class: "chip on", text: `watchlist #${w.rank}` }));
+  if (cs && cs.rs_rating != null) out.push(el("span", { class: "chip" + (g.canslim_rs_80 ? " on" : ""), text: `RS ${cs.rs_rating}` }));
+  if (cs && cs.letters_passed != null) out.push(el("span", { class: "chip" + (g.canslim_4_letters ? " on" : ""), text: `CANSLIM ${cs.letters_passed}/7` }));
+  if (cs && cs.signal && cs.signal !== "NONE") out.push(el("span", { class: "chip on", text: cs.signal.replaceAll("_", " ").toLowerCase() }));
+  return el("div", { class: "chips" }, out);
+}
+
+function renderCandidates(c, mod) {
+  const n = showAll ? c.length : Math.min(15, c.length);
+  $("toggle-all").textContent = c.length > 15 ? (showAll ? "Show the top 15" : `Show all ${c.length}`) : "";
+  $("cand-sub").textContent = mod ? `${mod.target}. Chance = the model's probability, mapped to how often it came true on sessions it had not trained on.` : "";
+  const head = el("tr", {}, el("th", { text: "#" }), el("th", { text: "Symbol" }), el("th", { class: "num", text: "Price → target" }),
+    el("th", { text: "Chance" }), el("th", { class: "num", text: "Model P" }),
+    el("th", { class: "num", text: "40-min return p25 / p50 / p75" }), el("th", { class: "num", text: "Day" }),
+    el("th", { class: "num", text: "Vol #" }));
+  const rows = [el("thead", {}, head)];
+  const body = el("tbody");
+  if (!c.length) body.append(el("tr", {}, el("td", { colspan: 8, class: "empty", text: (data && data.status !== "ok" && data.status) || "No candidates yet." })));
+  for (const x of c.slice(0, n)) {
+    const p = x.p_seen ?? x.p_model;
+    const meter = el("span", { class: "meter" }, el("span", { style: `width:${Math.min(100, p / 0.5 * 100).toFixed(1)}%` }));
+    const tipLines = [[pct(p, 1), "chance (calibrated)"], [pct(x.p_model, 1), "model's probability"]];
+    if (x.band) tipLines.push([pct(x.band.seen, 1), `came true when it said ${x.band.band.replace("-", "–")} (${x.band.rows.toLocaleString()} cases)`]);
+    const chance = el("div", { class: "chance", tabindex: "-1",
+      onpointermove: (e) => showTip(e, tipLines), onpointerleave: hideTip }, meter, el("b", { text: pct(p) }));
+    const tr = el("tr", { class: "pick" + (x.rank <= 5 ? " top" : ""), tabindex: "0", "aria-expanded": open.has(x.symbol) ? "true" : "false",
+      onclick: () => toggle(x.symbol), onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(x.symbol); } },
+      onfocus: (e) => showTip({ currentTarget: chance, clientX: null, clientY: null }, tipLines), onblur: hideTip },
+      el("td", { class: "num muted", text: x.rank }),
+      el("td", { class: "symcell" }, el("div", { class: "sym", text: x.symbol }), chips(x.screener)),
+      el("td", { class: "num" }, el("div", { text: num(x.price) }), el("div", { class: "muted small", text: "→ " + num(x.target_price) })),
+      el("td", {}, chance), el("td", { class: "num muted", text: pct(x.p_model, 1) }),
+      el("td", { class: "num", text: `${pp(x.return_p25)} / ${pp(x.return_p50)} / ${pp(x.return_p75)}` }),
+      el("td", { class: "num", text: pp(x.day_change_pct, 1) }), el("td", { class: "num", text: x.vol_rank }));
+    body.append(tr);
+    if (open.has(x.symbol)) body.append(details(x, mod));
+  }
+  rows.push(body);
+  $("cand").replaceChildren(...rows);
+}
+
+function toggle(sym) { open.has(sym) ? open.delete(sym) : open.add(sym); render(); }
+
+function kv(pairs) {
+  return el("dl", { class: "kv" }, pairs.filter((p) => p).flatMap(([k, v]) => [el("dt", { text: k }), el("dd", { text: v })]));
+}
+
+function details(x, mod) {
+  const s = x.screener || {}, f = s.fundamentals, cs = s.canslim, b = s.bullish, w = s.watchlist;
+  const conf = el("div", {}, el("h3", { text: "Likelihood" }), kv([
+    ["Chance it comes true", pct(x.p_seen ?? x.p_model, 1)],
+    ["Model's probability", pct(x.p_model, 1)],
+    x.band && ["Out-of-sample check", `said ${pct(x.band.predicted, 0)} on ${x.band.rows.toLocaleString()} cases; ${pct(x.band.seen, 1)} came true`],
+    ["Target", `${num(x.target_price)} (+${mod.target_cfg.target_pct}%) from ${num(x.price)} at ${hm(x.last_ts)}`],
+    x.stop_price && ["Stop", num(x.stop_price)],
+    ["40-min return band", `${pp(x.return_p25)} … ${pp(x.return_p50)} … ${pp(x.return_p75)}`],
+    ["Volatility now", `${num(x.vol_pct, 3)}% of price, #${x.vol_rank} of ${data.candidates.length}`],
+  ]));
+  const maxEff = Math.max(1, ...x.drivers.map((d) => Math.abs(d.effect_pp)));
+  const drv = el("div", {}, el("h3", { text: "What moved it (vs today's median stock)" }),
+    x.drivers.length ? el("div", { class: "drv" }, x.drivers.flatMap((d) => {
+      const w = (Math.abs(d.effect_pp) / maxEff * 50).toFixed(1);
+      const val = d.value == null ? "–" : d.percent ? pp(d.value) : num(d.value, 2);
+      const med = d.median == null ? "" : ` (median ${d.percent ? pp(d.median) : num(d.median, 2)})`;
+      const tipLines = [[`${d.effect_pp >= 0 ? "+" : ""}${d.effect_pp.toFixed(1)} pts`, "of the model's P"], [val, d.label + med]];
+      return [el("div", { text: d.label }),
+        el("div", { class: "dbar", tabindex: "0", "aria-label": `${d.label}: ${d.effect_pp.toFixed(1)} points`,
+          onpointermove: (e) => showTip(e, tipLines), onpointerleave: hideTip },
+          el("span", { class: d.effect_pp >= 0 ? "up" : "down", style: `width:${w}%` })),
+        el("div", { class: "num small" }, el("span", { text: `${d.effect_pp >= 0 ? "+" : ""}${d.effect_pp.toFixed(1)} pts` }), el("br"), el("span", { class: "muted", text: val }))];
+    })) : el("div", { class: "empty", text: "Nothing moves it far from a typical stock." }),
+    el("div", { class: "muted small", style: "margin-top:6px", text: "Each input (with its rank and z-score across stocks) set to today's median; points of the model's P." }));
+  const scr = el("div", {}, el("h3", { text: "Screener (stock-analyzer)" }), kv([
+    cs && ["CANSLIM letters", `${cs.letters || "?"}, ${cs.letters_passed} of 7 passed`],
+    cs && ["RS rating", cs.rs_rating == null ? "–" : String(cs.rs_rating)],
+    cs && ["CANSLIM signal", `${(cs.signal || "–").replaceAll("_", " ").toLowerCase()} (run for ${cs.as_of})`],
+    cs && cs.pct_from_pivot != null && ["From pivot", pp(cs.pct_from_pivot, 1)],
+    cs && ["Market (CANSLIM M)", (cs.market_state || "").replaceAll("_", " ").toLowerCase()],
+    b && ["Bullish score", `${num(b.score, 1)}, #${b.rank}/${b.of} (${b.session})`],
+    ["Watchlist", w ? `#${w.rank} on the list made after ${w.as_of}` : "not picked"],
+    f && ["P/E · P/B", `${num(f.pe_now, 1)} · ${num(f.pb_now, 1)}`],
+    f && ["ROE · ROCE", `${num(f.roe, 1)}% · ${num(f.roce, 1)}%`],
+    f && ["Debt / equity", num(f.debt_to_equity, 2)],
+    f && ["Sales · profit growth TTM", `${pp(f.sales_growth_ttm, 1)} · ${pp(f.profit_growth_ttm, 1)}`],
+    f && ["Profit growth 3y", pp(f.profit_growth_3y, 1)],
+    f && ["From 52-week high", pp(f.pct_from_52w_high, 1)],
+    f && ["Market cap", `₹${num(f.market_cap_now_cr, 0)} cr`],
+    f && ["Results quarter", f.results_quarter || "–"],
+  ]), cs && cs.reason ? el("div", { class: "muted small", style: "margin-top:6px", text: cs.reason }) : null,
+    el("div", { class: "muted small", style: "margin-top:6px", text: "Fundamentals are one snapshot: shown, not measured." }));
+  const concl = el("div", { class: "dconc" }, el("h3", { text: "Conclusion" }),
+    el("ul", { class: "conclusion" }, (x.conclusion || []).map((t) => el("li", { text: t }))));
+  return el("tr", { class: "details" }, el("td", { colspan: 8 }, concl, el("div", { class: "dgrid" }, conf, drv, scr)));
+}
+
+function renderEvidence(e) {
+  if (!e || !e.rows || !e.rows.length) {
+    $("evid-sub").textContent = "Not measured yet. Run: stock-predictor screener-evidence --model <a model trained without the held-out month> --record";
+    $("evid").replaceChildren(); return;
+  }
+  $("evid-sub").textContent = `Hit rate of the target for stocks in each screener group vs the rest, at every 15-minute point, `
+    + `using only what was published before each session (${e.sessions} sessions). "Within the top 5" asks whether the signal changes the model's call: `
+    + `the model's picks on sessions it had not trained on (${e.version}), in the group vs not. Counts in brackets are picks.`;
+  const icon = { "supports": "✓", "against": "✕", "no measurable difference": "–", "too little history to tell": "?" };
+  const head = el("tr", {}, ["Signal", "Sessions", "Symbol-days", "In group", "Rest", "Lift", "On its own", "Top 5 in", "Top 5 rest", "Within the top 5"]
+    .map((h, i) => el("th", { class: i && i < 6 || i === 7 || i === 8 ? "num" : null, text: h })));
+  const body = el("tbody", {}, e.rows.map((r) => el("tr", {},
+    el("td", {}, el("div", { text: r.definition }), el("div", { class: "muted small", text: r.signal })),
+    el("td", { class: "num", text: r.sessions }), el("td", { class: "num", text: r.group_symbol_days.toLocaleString() }),
+    el("td", { class: "num", text: pct(r.group_hit, 1) }), el("td", { class: "num", text: pct(r.rest_hit, 1) }),
+    el("td", { class: "num", text: r.lift == null ? "–" : r.lift.toFixed(2) + "×" }),
+    el("td", { text: `${icon[r.reading] || ""} ${r.reading}` }),
+    el("td", { class: "num", text: r.top_rows ? `${pct(r.top_hit, 0)} (${r.top_rows})` : "–" }),
+    el("td", { class: "num", text: r.top_rest_rows ? `${pct(r.top_rest_hit, 0)} (${r.top_rest_rows})` : "–" }),
+    el("td", { text: r.top_reading ? `${icon[r.top_reading] || ""} ${r.top_reading}` : "–" }))));
+  $("evid").replaceChildren(el("thead", {}, head), body);
+}
+
+function renderModel(mod) {
+  if (!mod) { $("model").replaceChildren(el("div", { class: "empty", text: "No fixed-target model loaded." })); return; }
+  const parts = [kv([
+    ["Model", mod.version], ["Question", mod.target], ["Backend", mod.backend],
+    ["Trained on", `${mod.train_sessions} sessions through ${mod.trained_through}, every ${mod.minute_step === 1 ? "minute" : mod.minute_step + " minutes"}`],
+    ["Inputs", `${mod.features} per symbol-minute${mod.candidate_features.length ? "; candidates on: " + mod.candidate_features.join(", ") : ""}`],
+  ])];
+  const e = mod.evaluation;
+  if (e && e.summary) {
+    const s = e.summary;
+    parts.push(el("h3", { class: "small", style: "margin:14px 0 6px", text: `Held out: ${e.session_count} sessions, ${e.sessions[0]}…${e.sessions[1]}` }),
+      el("table", {}, el("thead", {}, el("tr", {}, el("th", { text: `Top ${e.top_n} by` }), el("th", { class: "num", text: "Hit" }), el("th", { class: "num", text: "Net/trade" }))),
+        el("tbody", {}, [["the model", s.model], ["volatility now", s.intraday_volatility], ["20-day ATR", s.highest_volatility]].map(([k, v]) =>
+          el("tr", {}, el("td", { text: k }), el("td", { class: "num", text: pct(v.hit, 1) }), el("td", { class: "num", text: pp(v.net) }))),
+          el("tr", {}, el("td", { class: "muted", text: "any stock" }), el("td", { class: "num muted", text: pct(s.base_hit, 1) }), el("td", { class: "num muted", text: pp(s.base_net) })))),
+      el("div", { class: "muted small", style: "margin-top:6px", text: `${e.version}: the same target trained without those sessions. Net: sell at the target or after the window, less ${num(e.cost_pct, 3)}% costs.` }));
+  }
+  if (mod.calibration && mod.calibration.length) {
+    parts.push(el("h3", { class: "small", style: "margin:14px 0 6px", text: "Model's probability vs how often it came true" }),
+      el("table", {}, el("thead", {}, el("tr", {}, el("th", { text: "Model said" }), el("th", { class: "num", text: "Came true" }), el("th", { class: "num", text: "Cases" }))),
+        el("tbody", {}, mod.calibration.map((b) => el("tr", {}, el("td", { text: `${pct(b.predicted, 0)} (${b.band.replace("-", "–")})` }),
+          el("td", { class: "num", text: pct(b.seen, 1) }), el("td", { class: "num", text: b.rows.toLocaleString() }))))),
+      el("div", { class: "muted small", style: "margin-top:6px", text: "Last 20 training sessions, from a fit that left them out." }));
+  }
+  $("model").replaceChildren(...parts);
+}
+
+function renderVol(v, c) {
+  if (!v.length) { $("vol").replaceChildren(el("div", { class: "empty", text: "–" })); return; }
+  $("vol").replaceChildren(el("table", {}, el("tbody", {}, v.map((x, i) => el("tr", {},
+    el("td", { class: "muted num", text: i + 1 }), el("td", { class: "sym", text: x.symbol }),
+    el("td", { class: "num", text: num(x.vol_pct, 3) + "%" }),
+    el("td", { class: "num muted", text: `model #${x.rank}` }))))));
+}
+
+function renderRanking(r) {
+  if (!r || !r.picks || !r.picks.length) { $("rank").replaceChildren(el("div", { class: "empty", text: "No ranking computed yet." })); return; }
+  if (r.model_version.startsWith("fallback")) {
+    $("rank").replaceChildren(
+      el("table", {}, el("thead", {}, el("tr", {}, el("th", { text: "#" }), el("th", { text: "Symbol" }), el("th", { class: "num", text: "20-day ATR" }))),
+        el("tbody", {}, r.picks.slice(0, 5).map((p) => el("tr", {}, el("td", { class: "num muted", text: p.rank }), el("td", { class: "sym", text: p.symbol }),
+          el("td", { class: "num", text: num(p.gain_p50) + "%" }))))),
+      el("div", { class: "muted small", style: "margin-top:6px", text: `No ranking model is served (serve --model), so this is the ${r.model_version} baseline: the widest 20-day ATR, as of ${hm(r.as_of)}.` }));
+    return;
+  }
+  $("rank").replaceChildren(
+    el("table", {}, el("thead", {}, el("tr", {}, el("th", { text: "#" }), el("th", { text: "Symbol" }), el("th", { class: "num", text: "Gain p25 / p50 / p75" }), el("th", { text: "Duration" }))),
+      el("tbody", {}, r.picks.slice(0, 5).map((p) => el("tr", {}, el("td", { class: "num muted", text: p.rank }), el("td", { class: "sym", text: p.symbol }),
+        el("td", { class: "num", text: `${pp(p.gain_p25)} / ${pp(p.gain_p50)} / ${pp(p.gain_p75)}` }), el("td", { text: p.duration_bucket || "–" }))))),
+    el("div", { class: "muted small", style: "margin-top:6px", text: `${r.model_version}, as of ${hm(r.as_of)} (${r.session})` }));
+}
+
+function renderRequests(r, a) {
+  const cfg = a.config || {};
+  $("req-sub").textContent = cfg.found
+    ? `Its live monitor asks POST ${cfg.model_url || "/predict/intraday"} for a ${cfg.model_horizon_minutes || 30}-minute signal on every tracked symbol each poll, `
+      + (cfg.model_enabled ? "and it is switched on." : "but only with model.enabled=true; it is false in its application.properties, so it scores with its own time-of-day prior and nothing reaches this service.")
+    : "stock-analyzer's application.properties was not found beside its database.";
+  if (!r.by_symbol || !r.by_symbol.length) {
+    $("req").replaceChildren(el("div", { class: "empty", text: `No requests since this service started at ${hm(r.since)}.` }));
+    return;
+  }
+  $("req").replaceChildren(el("div", { style: "overflow-x:auto" }, el("table", {},
+    el("thead", {}, el("tr", {}, ["Symbol", "Requests", "Rows", "Last", "Latest candle", "Signal", "P"].map((h, i) => el("th", { class: i && i !== 5 ? "num" : null, text: h })))),
+    el("tbody", {}, r.by_symbol.map((x) => el("tr", {}, el("td", { class: "sym", text: x.symbol }),
+      el("td", { class: "num", text: x.requests }), el("td", { class: "num", text: x.last_rows }),
+      el("td", { class: "num", text: hms(x.last_at) }), el("td", { class: "num", text: hm(x.last_ts_epoch) }),
+      el("td", { text: x.last_signal || "–" }), el("td", { class: "num", text: pct(x.last_probability, 1) })))))),
+    el("div", { class: "muted small", style: "margin-top:6px", text: `${r.total} requests from ${r.symbols} symbols since ${hm(r.since)}` }));
+}
+
+function renderPoll(a, m) {
+  const parts = [];
+  const late = (a.tracked || []).filter((t) => t.behind_minutes != null && t.behind_minutes >= 3);
+  parts.push(el("div", { class: "sub small", style: "margin-bottom:8px",
+    text: `${(a.tracked || []).length} symbols in today's live candles, polled every ${(a.config && a.config.poll_seconds) || 150} s. `
+      + (late.length ? `${late.length} are 3 or more minutes behind the rest.` : "None is behind the rest.") }));
+  parts.push(el("div", { class: "syms" }, (a.tracked || []).map((t) => el("span", {
+    class: t.behind_minutes >= 3 ? "late" : null, text: t.behind_minutes >= 3 ? `! ${t.symbol} −${t.behind_minutes}m` : t.symbol,
+    title: `last finished candle ${hm(t.last_ts)}` }))));
+  if ((a.bought_today || []).length) {
+    parts.push(el("h3", { class: "small", style: "margin:14px 0 6px", text: "Bought today" }),
+      el("div", { class: "syms" }, a.bought_today.map((s) => el("span", { text: s + ((a.untracked_buys || []).includes(s) ? " (not tracked: polled for its sell targets)" : "") }))));
+  }
+  if ((a.trades_today || []).length) {
+    parts.push(el("h3", { class: "small", style: "margin:14px 0 6px", text: `Trades today (${a.trades_today.length})` }),
+      el("table", {}, el("tbody", {}, a.trades_today.slice(-8).reverse().map((t) => el("tr", {},
+        el("td", { class: "num muted", text: hm(t.ts_epoch) }), el("td", { class: "sym", text: t.symbol }),
+        el("td", { text: `${t.side.toLowerCase()} ${t.product}` }), el("td", { class: "num", text: `${t.quantity} @ ${num(t.price)}` }))))));
+  }
+  if ((a.holdings || []).length) {
+    parts.push(el("h3", { class: "small", style: "margin:14px 0 6px", text: "Holdings" }),
+      el("table", {}, el("tbody", {}, a.holdings.map((h) => el("tr", {}, el("td", { class: "sym", text: h.symbol }),
+        el("td", { class: "num", text: `${h.quantity} @ ${num(h.average_price)}` }), el("td", { class: "num", text: pp(h.unrealised_pct, 1) }))))));
+  }
+  $("poll").replaceChildren(...parts);
+}
+
+async function load() {
+  $("root").classList.add("loading");
+  try {
+    const r = await fetch("/dashboard/data", { cache: "no-store" });
+    data = await r.json();
+    render();
+  } catch (e) {
+    $("banner").replaceChildren(el("div", { class: "banner", role: "status", text: "Could not reach the service: " + e }));
+    $("root").classList.remove("loading");
+  }
+}
+$("reload").addEventListener("click", load);
+$("toggle-all").addEventListener("click", () => { showAll = !showAll; render(); });
+$("theme").addEventListener("click", () => {
+  const dark = document.documentElement.dataset.theme
+    ? document.documentElement.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  document.documentElement.dataset.theme = dark ? "light" : "dark";
+});
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>

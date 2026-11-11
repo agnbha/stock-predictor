@@ -50,7 +50,6 @@ _FRAME_SOURCES = (
     "data/framestore.py",
     "clock.py",
     "params.py",
-    "models/training.py",
 )
 
 

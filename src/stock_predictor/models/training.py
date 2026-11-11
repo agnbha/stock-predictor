@@ -40,11 +40,13 @@ from stock_predictor.config import LAST_INTRADAY_POINT
 from stock_predictor.data.analyzer import AnalyzerViews
 from stock_predictor.data.framestore import FrameStore, code_fingerprint, data_fingerprints, variant_key
 from stock_predictor.features.pipeline import build_feature_frame
+from stock_predictor.features.session import session_features, training_as_of  # noqa: F401 (re-exported)
 from stock_predictor.models.triple_barrier import TripleBarrierConfig, barrier_arrays
 from stock_predictor.params import Params, get_params
 
 # Columns that are identifiers, raw inputs, or labels -- never model features.
-LABEL_COLUMNS = ("label_class", "forward_return_pct", "minutes_to_barrier", "label_complete")
+LABEL_COLUMNS = ("label_class", "forward_return_pct", "max_gain_pct", "minutes_to_barrier",
+                 "label_complete")
 NON_FEATURE_COLUMNS = {
     "symbol", "session_date", "as_of", "ts_epoch",
     "_open", "_high", "_low", "_close",
@@ -54,12 +56,6 @@ NON_FEATURE_COLUMNS = {
 
 def model_feature_columns(frame) -> list[str]:
     return [c for c in frame.columns if c not in NON_FEATURE_COLUMNS]
-
-
-def training_as_of(session_date: str) -> int:
-    """Training frames run to the last prediction point; labels near it are
-    cut off by the time barrier there."""
-    return NSE.epoch_of(date.fromisoformat(session_date), LAST_INTRADAY_POINT)
 
 
 def attach_labels(views: AnalyzerViews, session_date: str, frame, cfg: Optional[TripleBarrierConfig] = None):
@@ -77,7 +73,8 @@ def attach_labels(views: AnalyzerViews, session_date: str, frame, cfg: Optional[
 
     n = len(frame)
     out = {"label_class": np.zeros(n, np.int8), "forward_return_pct": np.zeros(n),
-           "minutes_to_barrier": np.zeros(n, np.int64), "label_complete": np.zeros(n, bool)}
+           "max_gain_pct": np.zeros(n), "minutes_to_barrier": np.zeros(n, np.int64),
+           "label_complete": np.zeros(n, bool)}
     row_ts = frame["ts_epoch"].to_numpy()
     row_atr = (frame["atr_14"] / frame["_close"].replace(0, 1) * 100.0).to_numpy()
     for sym, rows in frame.groupby("symbol", sort=False).indices.items():
@@ -92,17 +89,12 @@ def attach_labels(views: AnalyzerViews, session_date: str, frame, cfg: Optional[
                            atr, cfg, ts=ts, last_ts=last_ts)
         out["label_class"][rows] = a["label"][pos]
         out["forward_return_pct"][rows] = a["forward_return_pct"][pos]
+        out["max_gain_pct"][rows] = a["max_gain_pct"][pos]
         out["minutes_to_barrier"][rows] = a["minutes_to_barrier"][pos]
         out["label_complete"][rows] = a["complete"][pos]
     for k, v in out.items():
         frame[k] = v
     return frame
-
-
-def session_features(views: AnalyzerViews, session_date: str, params: Optional[Params] = None):
-    """One completed session's feature frame, every minute to the last
-    prediction point -- what the frame store saves."""
-    return build_feature_frame(views, session_date, training_as_of(session_date), params=params)
 
 
 def labelled_session_frame(
@@ -260,6 +252,7 @@ class TrainingSet:
     sessions: list[str]
     minute_step: int = 1
     row_session: Optional[np.ndarray] = None  # index into ``sessions`` per row
+    max_gain_pct: Optional[np.ndarray] = None  # best high in each row's window, vs its close
 
     @property
     def rows(self) -> int:
@@ -282,7 +275,7 @@ def training_set(
         raise ValueError("minute_step must be >= 1")
     source = source or FrameSource(views, params, cfg)
     names: Optional[list[str]] = None
-    xs, ys, rs, used, idx = [], [], [], [], []
+    xs, ys, rs, gs, used, idx = [], [], [], [], [], []
     for i, sd in enumerate(sessions, start=1):
         if progress:
             progress(i, len(sessions), sd)
@@ -298,6 +291,7 @@ def training_set(
         xs.append(f.reindex(columns=names).to_numpy(dtype=np.float64))
         ys.append(f["label_class"].to_numpy(dtype=np.int8))
         rs.append(f["forward_return_pct"].to_numpy(dtype=np.float64))
+        gs.append(f["max_gain_pct"].to_numpy(dtype=np.float64))
         idx.append(np.full(len(f), len(used), dtype=np.int32))
         used.append(sd)
         del f
@@ -310,7 +304,7 @@ def training_set(
     np.concatenate(xs, axis=0, out=X)
     del xs
     return TrainingSet(X, np.concatenate(ys), np.concatenate(rs), names or [], used, minute_step,
-                       np.concatenate(idx))
+                       np.concatenate(idx), np.concatenate(gs))
 
 
 def training_frame(

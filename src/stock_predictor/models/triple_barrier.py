@@ -7,7 +7,12 @@ stock-analyzer's model contract already describes -- the two share a definition.
 
 A fixed target instead asks a plain question: does the price touch
 +``target_pct`` within the next H minutes? ``stop_pct`` adds a lower barrier
-at -``stop_pct``, so the label becomes "target before stop".
+at -``stop_pct``, so the label becomes "target before stop". ``to_close``
+replaces the H minutes with the rest of the session: does the price touch
++``target_pct`` at any point before the close?
+
+Every mode also reports ``max_gain_pct``: the best high in the window against
+the entry, the most a buyer at that close could have sold for.
 
 Entry is the close of the row's own candle; the window is the candles after
 it whose start is within H clock minutes (a minute with no trades is a gap,
@@ -38,12 +43,21 @@ class TripleBarrierConfig:
     # unused): +target_pct within the horizon; stop_pct adds a lower barrier.
     target_pct: Optional[float] = None
     stop_pct: Optional[float] = None
+    # The window is the rest of the session (horizon_minutes is then unused).
+    # Needs a fixed target and no stop.
+    to_close: bool = False
+
+    def __post_init__(self) -> None:
+        if self.to_close and (self.target_pct is None or self.stop_pct is not None):
+            raise ValueError("to_close needs a fixed target (target_pct) and no stop")
 
     @property
     def fixed(self) -> bool:
         return self.target_pct is not None
 
     def describe(self) -> str:
+        if self.to_close:
+            return f"+{self.target_pct:g}% before the close"
         h = f"{self.horizon_minutes} min"
         if not self.fixed:
             return f"+{self.upper_atr_mult:g}/-{self.lower_atr_mult:g} x ATR within {h}"
@@ -75,7 +89,8 @@ def barrier_arrays(
     candles. ``last_ts`` is the start of the session's last minute: a window
     ending after it is incomplete. Without it, the last candle given.
     Returns arrays ``label`` (int8), ``forward_return_pct`` (close at the end of
-    the window, vs entry), ``minutes_to_barrier`` and ``complete``.
+    the window, vs entry), ``max_gain_pct`` (best high in the window, vs entry;
+    0 with nothing after), ``minutes_to_barrier`` and ``complete``.
     """
     c = cfg or TripleBarrierConfig()
     cl = np.asarray(close, dtype=np.float64)
@@ -84,6 +99,8 @@ def barrier_arrays(
     n = len(cl)
     idx = np.arange(n)
     t = np.asarray(ts, dtype=np.int64) if ts is not None else idx * 60
+    if c.to_close:
+        return _to_close(cl, hi, t, c.target_pct)
     limit = t + c.horizon_minutes * 60
     if c.fixed:
         up = cl * (1 + c.target_pct / 100.0)
@@ -97,6 +114,7 @@ def barrier_arrays(
     first_up = np.full(n, n)  # index of the first candle to reach each barrier; n = none
     first_dn = np.full(n, n)
     end = idx.copy()
+    best = cl.copy()
     for k in range(1, c.horizon_minutes + 1):
         j = idx + k
         ok = j < n
@@ -109,6 +127,7 @@ def barrier_arrays(
         m = ok & (first_dn == n) & (lo[j] <= dn)
         first_dn[m] = j[m]
         end[ok] = j[ok]
+        best = np.where(ok, np.maximum(best, hi[j]), best)
 
     stopped = (first_dn < n) & (first_dn <= first_up)
     hit = (first_up < n) & ~stopped
@@ -117,11 +136,58 @@ def barrier_arrays(
     minutes = (t[at] - t) // 60
     with np.errstate(divide="ignore", invalid="ignore"):
         fwd = (cl[end] - cl) / cl * 100.0
+        gain = (best - cl) / cl * 100.0
     dead = cl <= 0
-    label[dead], fwd[dead], minutes[dead] = 0, 0.0, c.horizon_minutes
+    label[dead], fwd[dead], minutes[dead], gain[dead] = 0, 0.0, c.horizon_minutes, 0.0
     complete = limit <= (last_ts if last_ts is not None else (t[-1] if n else 0))
-    return {"label": label, "forward_return_pct": fwd, "minutes_to_barrier": minutes,
-            "complete": complete}
+    return {"label": label, "forward_return_pct": fwd, "max_gain_pct": gain,
+            "minutes_to_barrier": minutes, "complete": complete}
+
+
+def first_reach(high: np.ndarray, level: np.ndarray) -> np.ndarray:
+    """For each i, the first j > i with ``high[j] >= level[i]``; ``len(high)``
+    where none does. One pass from the right with a monotonic stack: of the
+    candles after i, only those taller than every nearer one can be first."""
+    n = len(high)
+    out = np.full(n, n)
+    stack_idx: list[int] = []   # nearest candidate last
+    stack_neg: list[float] = []  # -high, increasing along the list
+    from bisect import bisect_right
+
+    for i in range(n - 2, -1, -1):
+        h = float(high[i + 1])
+        while stack_neg and -stack_neg[-1] <= h:  # farther and no taller: never first
+            stack_neg.pop()
+            stack_idx.pop()
+        stack_idx.append(i + 1)
+        stack_neg.append(-h)
+        p = bisect_right(stack_neg, -float(level[i]))  # how many candidates reach the level
+        if p:
+            out[i] = stack_idx[p - 1]
+    return out
+
+
+def _to_close(cl: np.ndarray, hi: np.ndarray, t: np.ndarray, target_pct: float) -> dict:
+    """The window is every later candle in the session; it always ends at the
+    close, so every row is complete."""
+    n = len(cl)
+    up = cl * (1 + target_pct / 100.0)
+    first = first_reach(hi, up)
+    hit = first < n
+    label = hit.astype(np.int8)
+    after = np.empty(n)
+    if n:
+        after[:-1] = np.maximum.accumulate(hi[::-1])[::-1][1:]  # best high strictly later
+        after[-1] = cl[-1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fwd = (cl[-1] - cl) / cl * 100.0 if n else np.zeros(0)
+        gain = np.maximum(after - cl, 0.0) / cl * 100.0
+    last = t[-1] if n else 0
+    minutes = np.where(hit, (t[np.minimum(first, n - 1)] - t) // 60, (last - t) // 60)
+    dead = cl <= 0
+    label[dead], fwd[dead], gain[dead] = 0, 0.0, 0.0
+    return {"label": label, "forward_return_pct": fwd, "max_gain_pct": gain,
+            "minutes_to_barrier": minutes, "complete": np.ones(n, dtype=bool)}
 
 
 def triple_barrier_labels(

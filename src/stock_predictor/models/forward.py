@@ -3,7 +3,9 @@
 One row per (symbol, minute). Two heads share the feature matrix:
 
 * a classifier for P(upper barrier hit first over the next H minutes);
-* a quantile regressor for the forward-return band (p25 / p50 / p75).
+* a quantile regressor for a band (p25 / p50 / p75): by default the return at
+  the end of the window; with ``band="max_gain_pct"``, the best gain available
+  in it (the most a buyer at that minute could have sold for).
 
 This stage sees over a million examples and is trained without ever knowing
 what a "top five" is. Stage 2 reduces its output into the daily answer.
@@ -44,6 +46,7 @@ class ForwardModel:
     _qr: GBDTQuantileRegressor = field(default_factory=GBDTQuantileRegressor)
     trained: bool = False
     calibrator: Optional[GainCalibrator] = None  # P(up) -> rate seen (train --target)
+    band: str = "forward_return_pct"  # what gain_p25/50/75 describe: or "max_gain_pct"
 
     @property
     def backend(self) -> str:
@@ -56,12 +59,18 @@ class ForwardModel:
         return self.fit_matrix(self._matrix(frame), label_class, forward_return_pct)
 
     def fit_matrix(self, X: np.ndarray, label_class: Sequence[int],
-                   forward_return_pct: Sequence[float]) -> "ForwardModel":
+                   forward_return_pct: Sequence[float],
+                   max_gain_pct: Optional[Sequence[float]] = None) -> "ForwardModel":
         """Fit on a ready matrix whose columns are ``feature_names``, in order
         (``training_set`` builds one)."""
         y_up = (np.asarray(label_class) > 0).astype(int)
         self._clf.fit(X, y_up)
-        self._qr.fit(X, np.asarray(forward_return_pct, dtype=float))
+        if self.band == "max_gain_pct":
+            if max_gain_pct is None:
+                raise ValueError("band='max_gain_pct' needs max_gain_pct")
+            self._qr.fit(X, np.asarray(max_gain_pct, dtype=float))
+        else:
+            self._qr.fit(X, np.asarray(forward_return_pct, dtype=float))
         self.trained = True
         return self
 

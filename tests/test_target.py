@@ -7,6 +7,7 @@ import sqlite3
 from datetime import date, time
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from stock_predictor.clock import NSE
@@ -182,3 +183,63 @@ def test_labels_look_past_the_last_prediction_point(views, sessions, tmp_path):
     ts = training_set(views, [sd], source=source)
     assert ts.rows == len(complete)
     assert set(np.unique(ts.label_class)) <= {0, 1}
+
+
+# -- to the close, and the best gain available ---------------------------------
+
+
+def test_to_close_is_touching_the_target_before_the_close():
+    from stock_predictor.models.triple_barrier import TripleBarrierConfig, barrier_arrays
+
+    cfg = TripleBarrierConfig(target_pct=0.5, to_close=True)
+    close = [100.0, 100.0, 100.4, 100.0, 99.0]
+    high = [100.0, 100.2, 100.6, 100.1, 99.5]
+    a = barrier_arrays(close, high, close, None, cfg, ts=[0, 60, 120, 180, 240])
+    assert a["label"].tolist() == [1, 1, 0, 0, 0]  # 100.6 is +0.6% from 100, +0.2% from 100.4
+    assert a["minutes_to_barrier"].tolist()[:2] == [2, 1]
+    np.testing.assert_allclose(a["max_gain_pct"], [0.6, 0.6, 0.0, 0.0, 0.0], atol=1e-9)
+    np.testing.assert_allclose(a["forward_return_pct"], [-1.0, -1.0, (99 / 100.4 - 1) * 100, -1.0, 0.0])
+    assert a["complete"].all()
+    with pytest.raises(ValueError):
+        TripleBarrierConfig(target_pct=0.5, stop_pct=0.5, to_close=True)
+    with pytest.raises(ValueError):
+        TripleBarrierConfig(to_close=True)
+
+
+def test_first_reach_and_max_gain_match_a_direct_search():
+    from stock_predictor.models.triple_barrier import TripleBarrierConfig, barrier_arrays, first_reach
+
+    rng = np.random.default_rng(3)
+    for _ in range(100):
+        n = int(rng.integers(1, 50))
+        hi, lv = rng.normal(100, 1, n), rng.normal(100.5, 1, n)
+        assert first_reach(hi, lv).tolist() == [
+            next((j for j in range(i + 1, n) if hi[j] >= lv[i]), n) for i in range(n)]
+    close = 100 * np.exp(np.cumsum(rng.normal(0, 0.003, 120)))
+    high = close * 1.002
+    for cfg in (TripleBarrierConfig(horizon_minutes=15, target_pct=1.0), TripleBarrierConfig(horizon_minutes=15)):
+        a = barrier_arrays(close, high, close * 0.998, np.full(120, 0.2), cfg)
+        ref = [max([0.0] + [(high[j] / close[i] - 1) * 100 for j in range(i + 1, min(i + 16, 120))])
+               for i in range(120)]
+        np.testing.assert_allclose(a["max_gain_pct"], ref, atol=1e-9)
+
+
+def test_to_close_versions_points_and_the_max_gain_band():
+    from stock_predictor.models import ForwardModel, GBDTClassifier, GBDTQuantileRegressor
+
+    cfg = TripleBarrierConfig(target_pct=0.5, to_close=True)
+    assert model_version_string("sklearn", "d", cfg) == "sklearn-target-0.5pct-close/d"
+    assert cfg.describe() == "+0.5% before the close"
+    assert default_points(cfg)[-1] == time(15, 0)
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(2000, 2))
+    gain = np.abs(X[:, 0]) + 1.0  # the band should follow this, not the return
+    ret = -gain
+    m = ForwardModel(["a", "b"], GBDTClassifier(n_estimators=20), GBDTQuantileRegressor(n_estimators=40),
+                     band="max_gain_pct")
+    m.fit_matrix(X, (gain > 1.5).astype(int), ret, gain)
+    p = m.predict(pd.DataFrame(X[:200], columns=["a", "b"]))
+    assert (p.gain_p50 > 0.5).mean() > 0.95
+    with pytest.raises(ValueError):
+        ForwardModel(["a", "b"], band="max_gain_pct").fit_matrix(X, gain > 1, ret)
