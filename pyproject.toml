@@ -40,6 +40,9 @@ stock-predictor = "stock_predictor.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+stock_predictor = ["serving/dashboard.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]

@@ -5,6 +5,8 @@
     GET  /predictions/{symbol}   one symbol's expectation
     GET  /model                  version, trained window, held-out metrics
     POST /predict/intraday       stock-analyzer's existing per-candle contract
+    GET  /dashboard              the live board (HTML)
+    GET  /dashboard/data         the live board's snapshot (JSON)
 
 Every response that carries a ranking also carries ``as_of`` -- a consumer must
 be able to tell a fresh answer from a stale one.
@@ -13,6 +15,7 @@ be able to tell a fresh answer from a stale one.
 # NB: no `from __future__ import annotations` here -- FastAPI/pydantic need the
 # request-model annotations as real objects, not strings.
 
+from pathlib import Path
 from typing import List, Optional
 
 try:
@@ -39,9 +42,13 @@ class IntradayRequest(BaseModel):
     rows: List[IntradayRow]
 
 
-def create_app(service: Optional[PredictorService] = None):
+DASHBOARD_HTML = Path(__file__).with_name("dashboard.html")
+
+
+def create_app(service: Optional[PredictorService] = None, board=None):
     try:
         from fastapi import FastAPI, HTTPException
+        from fastapi.responses import HTMLResponse
     except ModuleNotFoundError as exc:  # pragma: no cover
         raise RuntimeError("serving needs the extra: pip install 'stock-predictor[serving]'") from exc
 
@@ -119,6 +126,18 @@ def create_app(service: Optional[PredictorService] = None):
             "train_sessions": card.train_sessions,
             "holdout_metrics": card.holdout_metrics,
         }
+
+    @app.get("/dashboard", response_class=HTMLResponse)
+    def dashboard():
+        return HTMLResponse(DASHBOARD_HTML.read_text(encoding="utf-8"),
+                            headers={"Cache-Control": "no-store"})
+
+    @app.get("/dashboard/data")
+    def dashboard_data():
+        if board is None:
+            return {"status": "the live board is not running (serve starts it)",
+                    "requests": svc.requests.summary(), "ranking": None}
+        return board.snapshot()
 
     @app.post("/predict/intraday")
     def predict_intraday(req: IntradayRequest):

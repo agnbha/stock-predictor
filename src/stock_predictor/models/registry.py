@@ -23,7 +23,8 @@ def model_version_string(backend: str, trained_through: str, target=None) -> str
     itself so models for different targets do not overwrite each other."""
     if target is not None and target.fixed:
         stop = f"-stop{target.stop_pct:g}pct" if target.stop_pct is not None else ""
-        return f"{backend}-target-{target.target_pct:g}pct{stop}-{target.horizon_minutes}m/{trained_through}"
+        window = "close" if target.to_close else f"{target.horizon_minutes}m"
+        return f"{backend}-target-{target.target_pct:g}pct{stop}-{window}/{trained_through}"
     if target is not None and target.horizon_minutes != 30:
         return f"{backend}-triple-barrier-{target.horizon_minutes}m/{trained_through}"
     return f"{backend}-triple-barrier/{trained_through}"
@@ -47,6 +48,8 @@ class ModelCard:
     # For a fixed target: P(target) as predicted vs as seen, on sessions the
     # calibration model had not trained on (rows: band, predicted, seen, rows).
     calibration: list[dict[str, Any]] = field(default_factory=list)
+    # What the model's p25/p50/p75 band describes (ForwardModel.band).
+    band: str = "forward_return_pct"
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -87,6 +90,48 @@ class ModelRegistry:
             return None
         with cards[0].open() as fh:
             return json.load(fh)["model_version"]
+
+    def save_extra(self, version: str, name: str, data: Any) -> Path:
+        """A JSON result kept beside a model: ``evaluation``, ``screener_evidence``."""
+        p = self._dir(version) / f"{name}.json"
+        with p.open("w") as fh:
+            json.dump(data, fh, indent=1)
+        return p
+
+    def load_extra(self, version: str, name: str) -> Optional[Any]:
+        p = self._dir(version) / f"{name}.json"
+        if not p.exists():
+            return None
+        with p.open() as fh:
+            return json.load(fh)
+
+    def cards(self) -> list[ModelCard]:
+        """Every saved model's card, newest first."""
+        out = []
+        for p in sorted(self.root.glob("*/card.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            with p.open() as fh:
+                out.append(ModelCard(**json.load(fh)))
+        return out
+
+    def latest_with_target(self, fixed: bool = True) -> Optional[str]:
+        """The fixed-target model (train --target) trained through the latest
+        session; of those, the one saved last."""
+        found = [c for c in self.cards()
+                 if bool(c.target and c.target.get("target_pct") is not None) == fixed]
+        if not found:
+            return None
+        return max(found, key=lambda c: c.trained_through).model_version  # cards() is newest first
+
+    def extra_for_target(self, name: str, target: dict) -> Optional[tuple[str, Any]]:
+        """The newest ``name`` result kept beside any model with this target:
+        the held-out evaluation of a model trained without the held-out month
+        describes the live model trained on the same target with it."""
+        for c in self.cards():
+            if c.target == target:
+                data = self.load_extra(c.model_version, name)
+                if data is not None:
+                    return c.model_version, data
+        return None
 
     def card(self, version: str) -> Optional[ModelCard]:
         p = self._dir(version) / "card.json"

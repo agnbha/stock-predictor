@@ -8,6 +8,7 @@ end with nothing trained -- the same design as stock-analyzer's
 
 from __future__ import annotations
 
+import threading
 import time
 from datetime import date
 from typing import Optional
@@ -21,6 +22,35 @@ from stock_predictor.labels.targets import build_targets
 from stock_predictor.serving.cache import CachedRanking, PredictionCache, RankedPick
 
 FALLBACK_VERSION = "fallback-highest-volatility/v1"
+
+
+class RequestLog:
+    """What stock-analyzer has asked ``POST /predict/intraday`` about since this
+    process started: per symbol, how often, when, and what was answered."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.started_at = int(time.time())
+        self._by_symbol: dict[str, dict] = {}
+
+    def record(self, symbol: str, session_date: str, horizon_minutes: int, rows: int,
+               last: Optional[dict], model_version: str) -> None:
+        now = int(time.time())
+        with self._lock:
+            e = self._by_symbol.setdefault(symbol, {"symbol": symbol, "requests": 0, "rows": 0,
+                                                    "first_at": now})
+            e["requests"] += 1
+            e["rows"] += rows
+            e.update(last_at=now, session_date=session_date, horizon_minutes=horizon_minutes,
+                     last_rows=rows, model_version=model_version,
+                     last_ts_epoch=(last or {}).get("ts_epoch"), last_signal=(last or {}).get("signal"),
+                     last_probability=(last or {}).get("probability"), last_reason=(last or {}).get("reason"))
+
+    def summary(self) -> dict:
+        with self._lock:
+            rows = sorted((dict(v) for v in self._by_symbol.values()), key=lambda e: -e["last_at"])
+        return {"since": self.started_at, "total": sum(r["requests"] for r in rows),
+                "symbols": len(rows), "by_symbol": rows}
 
 
 class PredictorService:
@@ -37,6 +67,7 @@ class PredictorService:
         self.cache = cache or PredictionCache()
         self.model = model
         self.model_version = model_version or FALLBACK_VERSION
+        self.requests = RequestLog()
 
     # -- the schedule calls this -----------------------------------------
 
@@ -134,6 +165,8 @@ class PredictorService:
             signal = "ENTRY" if p_up >= 0.5 else "NEUTRAL"
             preds.append({"ts_epoch": r["ts_epoch"], "signal": signal, "probability": p_up,
                           "reason": None})
+        last = max(preds, key=lambda p: p["ts_epoch"]) if preds else None
+        self.requests.record(symbol, session_date, horizon_minutes, len(rows), last, self.model_version)
         self.store.save_intraday_signals(
             [
                 {"model_version": self.model_version, "symbol": symbol, "session_date": session_date,

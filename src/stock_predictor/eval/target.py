@@ -34,8 +34,8 @@ CALIBRATION_EDGES = (0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 1.0)
 
 def default_points(cfg: TripleBarrierConfig, step_minutes: int = 15) -> list[time]:
     """09:30, then every ``step_minutes`` while the window still ends inside
-    the session."""
-    last = 15 * 60 + 29 - cfg.horizon_minutes  # minutes after midnight
+    the session (to 15:00 for a window that runs to the close)."""
+    last = 15 * 60 if cfg.to_close else 15 * 60 + 29 - cfg.horizon_minutes  # minutes after midnight
     out = []
     m = 9 * 60 + 30
     while m <= last:
@@ -63,12 +63,14 @@ class TargetReport:
     by_point: "object"      # DataFrame: one row per point
     calibration: "object"   # DataFrame: predicted vs realised, by probability band
     summary: dict
+    band_coverage: Optional[dict] = None  # share of outcomes at or below the predicted p25/p50/p75
+    filters: list = ()                    # "keep the symbols that ..." rules and how they did
 
     def to_dict(self) -> dict:
         return {
             "target": self.cfg.describe(), "sessions": [self.sessions[0], self.sessions[-1]],
             "session_count": len(self.sessions), "top_n": self.n, "cost_pct": self.cost_pct,
-            "summary": self.summary,
+            "summary": self.summary, "band_coverage": self.band_coverage, "filters": list(self.filters),
         }
 
 
@@ -110,7 +112,10 @@ def evaluate_target(
     if rows.empty:
         raise ValueError("no rows to evaluate")
     cost = round_trip_cost_pct(1000.0, 1000.0 * (1 + cfg.target_pct / 100.0))
-    rows["p"] = model.predict(rows).p_up
+    pred = model.predict(rows)
+    rows["p"] = pred.p_up
+    rows["p_seen"] = pred.p_seen if pred.p_seen is not None else np.nan
+    rows["band_p25"], rows["band_p50"], rows["band_p75"] = pred.gain_p25, pred.gain_p50, pred.gain_p75
     rows["intraday_volatility"] = rows["atr_14"] / rows["_close"].replace(0, np.nan)
     rows["hit"] = rows["label_class"] > 0
     rows["stopped"] = rows["label_class"] < 0
@@ -151,4 +156,21 @@ def evaluate_target(
         if cfg.stop_pct is not None:
             summary[name]["stopped"] = float(by_point[f"{name}_stopped"].mean())
     summary["model"]["predicted"] = float(by_point["model_p"].mean())
-    return TargetReport(cfg, used, n, cost, by_point, calibration, summary)
+
+    band_name = getattr(model, "band", "forward_return_pct")
+    actual = rows[band_name] if band_name in rows else rows["forward_return_pct"]
+    coverage = {"band": band_name,
+                **{q: float((actual <= rows[f"band_{q}"]).mean()) for q in ("p25", "p50", "p75")}}
+
+    points_seen = rows.groupby(["session_date", "point"]).ngroups
+    filters = []
+    for rule, keep in (
+        (f"chance >= 50% (model's P)", rows["p"] >= 0.5),
+        (f"chance >= 50% (calibrated)", rows["p_seen"] >= 0.5),
+        (f"band median >= +{cfg.target_pct:g}%", rows["band_p50"] >= cfg.target_pct),
+    ):
+        k = rows[keep.fillna(False).to_numpy(dtype=bool)]
+        if len(k):
+            filters.append({"rule": rule, "rows": int(len(k)), "per_session_point": len(k) / points_seen,
+                            "hit": float(k["hit"].mean()), "net": float(k["net"].mean())})
+    return TargetReport(cfg, used, n, cost, by_point, calibration, summary, coverage, filters)
