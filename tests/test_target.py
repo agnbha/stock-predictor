@@ -243,3 +243,15 @@ def test_to_close_versions_points_and_the_max_gain_band():
     assert (p.gain_p50 > 0.5).mean() > 0.95
     with pytest.raises(ValueError):
         ForwardModel(["a", "b"], band="max_gain_pct").fit_matrix(X, gain > 1, ret)
+
+
+def test_the_band_is_never_out_of_order():
+    from stock_predictor.models import ForwardModel, GBDTClassifier, GBDTQuantileRegressor
+
+    rng = np.random.default_rng(5)
+    X = rng.normal(size=(600, 2))
+    y = np.abs(X[:, 0]) + rng.normal(0, 2, 600)  # noisy, so separately fitted quantiles cross
+    m = ForwardModel(["a", "b"], GBDTClassifier(n_estimators=10), GBDTQuantileRegressor(n_estimators=60, max_depth=6))
+    m.fit_matrix(X, (y > 1).astype(int), y)
+    p = m.predict(pd.DataFrame(rng.normal(size=(500, 2)) * 3, columns=["a", "b"]))
+    assert (p.gain_p25 <= p.gain_p50).all() and (p.gain_p50 <= p.gain_p75).all()

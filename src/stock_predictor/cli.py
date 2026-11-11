@@ -5,6 +5,8 @@
                      (--target 1 --horizon 40: P(touch +1% within 40 minutes))
     predict          score the session in progress, now, with a trained model
     summary          stocks expected to gain +0.5% (or --target) before today's close
+    models           the trained models: target, training window, held-out result
+    scorecard        how recorded today.sh / tomorrow.sh picks did, per session or per stock
     evaluate         baselines (and the model, if trained) over a prediction point
     evaluate-target  how often a fixed-target model's top picks reach the target
     screener-evidence  whether stock-analyzer's screener data moves that hit rate
@@ -66,6 +68,14 @@ def _sessions(views: AnalyzerViews, args, candles_only: bool = False) -> list[st
         chosen = hold if getattr(args, "holdout", False) else dev
     if getattr(args, "max_sessions", None):
         chosen = chosen[-args.max_sessions :]
+    recent = getattr(args, "recent_days", None)
+    if recent and chosen:
+        # The last N calendar days of whatever was chosen: of the development
+        # sessions for a model to evaluate, of every session for one to use.
+        from datetime import timedelta
+
+        first = date.fromisoformat(chosen[-1]) - timedelta(days=recent)
+        chosen = [s for s in chosen if date.fromisoformat(s) > first]
     return chosen
 
 
@@ -155,6 +165,10 @@ def cmd_train(args) -> int:
     )
 
     cfg = _target_cfg(args)
+    if args.next_session:
+        if not cfg.fixed or cfg.stop_pct is not None:
+            raise SystemExit("--next-session needs --target (and no --stop)")
+        return _train_next_session(args, cfg)
     with AnalyzerViews() as views:
         sessions = _sessions(views, args, candles_only=cfg.fixed)
         if not sessions:
@@ -185,11 +199,59 @@ def cmd_train(args) -> int:
     model.fit_matrix(ts.X, ts.label_class, ts.forward_return_pct, ts.max_gain_pct)
     model.calibrator = calibrator
 
-    version = model_version_string(backend_name(), sessions[-1], cfg)
+    recent = getattr(args, "recent_days", None)
+    version = model_version_string(backend_name(), sessions[-1], cfg, step, recent)
     card = ModelCard(
         model_version=version, backend=backend_name(), trained_through=sessions[-1],
         train_sessions=len(ts.sessions), feature_names=cols, params=get_params().to_dict(),
         minute_step=step, target=asdict(cfg), calibration=calibration, band=band,
+        trained_from=ts.sessions[0], recent_days=recent, train_rows=ts.rows,
+    )
+    path = ModelRegistry().save(version, model, card)
+    print(f"saved {version} -> {path}")
+    return 0
+
+
+def _train_next_session(args, cfg) -> int:
+    """train --target X --next-session: one row per (symbol, session), the
+    state at 15:00 the session before against the outcome from the open."""
+    from dataclasses import asdict
+
+    from stock_predictor.models import ModelCard, ModelRegistry, backend_name, model_version_string, nextday
+    from stock_predictor.models.triple_barrier import TripleBarrierConfig
+
+    cfg = TripleBarrierConfig(target_pct=cfg.target_pct, to_close=True)
+    with AnalyzerViews() as views:
+        sessions = _sessions(views, args, candles_only=True)
+        if len(sessions) < 2:
+            print("too few sessions", file=sys.stderr)
+            return 1
+        print(f"target: +{cfg.target_pct:g}% from the next session's open, before its close")
+        print(f"pairing {len(sessions)} sessions ({sessions[0]}..{sessions[-1]}): the state at 15:00 "
+              "against the next session ...")
+        source = _frame_source(views, args, sessions=sessions)
+        rows = nextday.next_session_set(views, source, sessions, cfg.target_pct, progress=_progress("session"))
+        print(_frames_line(source))
+    if rows.empty:
+        print("no rows", file=sys.stderr)
+        return 1
+    names = nextday.feature_names(rows)
+    print(f"fitting: {len(rows):,} symbol-sessions x {len(names)} features, backend={backend_name()}, "
+          f"target hit on {rows['label_class'].mean():.1%} of them")
+    model, table = nextday.fit(rows, names, args.calibrate)
+    if table:
+        for r in table:
+            print(f"  P {r['band']}: predicted {r['predicted']:.1%}, came true {r['seen']:.1%} ({r['rows']} rows)")
+    else:
+        print("too few sessions to calibrate; chance will be the model's own probability")
+    recent = getattr(args, "recent_days", None)
+    version = model_version_string(backend_name(), sessions[-1], cfg, 1, recent, next_session=True)
+    card = ModelCard(
+        model_version=version, backend=backend_name(), trained_through=sessions[-1],
+        train_sessions=int(rows["session_date"].nunique()), feature_names=names,
+        params=get_params().to_dict(), minute_step=1, target=asdict(cfg), calibration=table,
+        band="max_gain_pct", trained_from=str(rows["session_date"].min()), recent_days=recent,
+        train_rows=len(rows), entry=nextday.ENTRY,
     )
     path = ModelRegistry().save(version, model, card)
     print(f"saved {version} -> {path}")
@@ -348,7 +410,8 @@ def cmd_summary(args) -> int:
     at = NSE.epoch_of(date.fromisoformat(session or date.today().isoformat()), _clock_time("T1", args.at)) \
         if args.at else None
     try:
-        s = summarise(args.target, args.min_chance / 100, args.top, args.model, session, at)
+        s = summarise(args.target, args.min_chance / 100, args.top, args.model, session, at,
+                      recent=args.recent, next_session=args.next_session)
     except SummaryUnavailable as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -356,6 +419,68 @@ def cmd_summary(args) -> int:
     if args.json:
         with open(args.json, "w") as fh:
             json.dump(s, fh, indent=1)
+    if args.record:
+        from stock_predictor.serving.summary import pick_rows
+
+        with Store() as store:
+            n = store.save_summary_picks(pick_rows(s))
+        print(f"\n(recorded {n} predictions; `stock-predictor scorecard` scores them after the close)"
+              if n else "\n(already recorded for this minute)")
+    return 0
+
+
+def cmd_scorecard(args) -> int:
+    from datetime import timedelta
+
+    from stock_predictor.serving.scorecard import format_scorecard, format_track_records, scorecard, track_records
+
+    with AnalyzerViews(live=True) as views, Store() as store:
+        if args.days:
+            since = (date.today() - timedelta(days=args.days)).isoformat()
+            # score anything closed but unscored first
+            for sd in store.summary_pick_sessions():
+                if sd >= since:
+                    scorecard(views, store, sd)
+            print(format_track_records(track_records(store, since), since))
+            return 0
+        session = args.session
+        if session is None:
+            today = views.session_in_progress()
+            session = today if today and views.last_finished_minute(today) is not None else views.sessions()[-1]
+        print(format_scorecard(scorecard(views, store, session)))
+    return 0
+
+
+def cmd_models(args) -> int:
+    """What each saved model was trained on, and its held-out check if kept."""
+    from stock_predictor.models import ModelRegistry, card_target
+
+    reg = ModelRegistry()
+    if args.prune is not None:
+        gone = reg.prune(args.prune, dry_run=args.dry_run)
+        verb = "would remove" if args.dry_run else "removed"
+        print(f"{verb} {len(gone)} superseded model(s)" + (": " + ", ".join(gone) if gone else ""))
+        return 0
+    cards = sorted(reg.cards(), key=lambda c: (c.model_version.split("/")[0], c.trained_through))
+    if not cards:
+        print("no trained models")
+        return 0
+    for c in cards:
+        cfg = card_target(c)
+        window = (f"{c.trained_from} to {c.trained_through}" if c.trained_from
+                  else f"through {c.trained_through}")
+        rows = f", {c.train_rows:,} rows" if c.train_rows else ""
+        step = "every minute" if c.minute_step == 1 else f"every {c.minute_step} minutes"
+        recent = f"last {c.recent_days} days: " if c.recent_days else ""
+        print(f"{c.model_version}")
+        print(f"  {cfg.describe()}; band: {c.band}; {'calibrated' if c.calibration else 'not calibrated'}")
+        print(f"  trained on {recent}{c.train_sessions} sessions, {window}, {step}{rows}")
+        ev = reg.load_extra(c.model_version, "evaluation")
+        if ev:
+            sm = ev["summary"]
+            print(f"  held out {ev['sessions'][0]} to {ev['sessions'][1]}: top 5 {sm['model']['hit']:.1%} "
+                  f"(most volatile {sm['intraday_volatility']['hit']:.1%}, any stock {sm['base_hit']:.1%}), "
+                  f"net {sm['model']['net']:+.3f}% a trade")
     return 0
 
 
@@ -368,6 +493,8 @@ def cmd_evaluate_target(args) -> int:
     if not cfg.fixed:
         print(f"{version} was not trained on a fixed target (train --target)", file=sys.stderr)
         return 1
+    if card.entry == "next_open":
+        return _evaluate_next_session(args, version, model, card, cfg)
     with AnalyzerViews() as views:
         sessions = _sessions(views, args, candles_only=True)
         seen = [s for s in sessions if s <= card.trained_through]
@@ -417,6 +544,52 @@ def cmd_evaluate_target(args) -> int:
              "hit": float(r["hit"]), "net": float(r["net"])}
             for r in rep.calibration.to_dict(orient="records")
         ]
+        data["model_version"] = version
+        print(f"recorded -> {ModelRegistry().save_extra(version, 'evaluation', data)}")
+    return 0
+
+
+def _evaluate_next_session(args, version, model, card, cfg) -> int:
+    from stock_predictor.models import ModelRegistry, nextday
+
+    with AnalyzerViews() as views:
+        sessions = _sessions(views, args, candles_only=True)
+        seen = [s for s in sessions if s <= card.trained_through]
+        if seen:
+            print(f"warning: {len(seen)} of these sessions are on or before {card.trained_through}, "
+                  "which the model was trained through: in-sample")
+        every = views.sessions()
+        i = every.index(sessions[0])
+        paired = every[max(0, i - 1):i] + sessions  # the session before the first, for its state
+        source = _frame_source(views, args, _card_params(card), sessions=paired)
+        rows = nextday.next_session_set(views, source, paired, cfg.target_pct)
+        rep = nextday.evaluate_next_session(model, rows, cfg.target_pct, args.n, views)
+        print(_frames_line(source))
+    s = rep.summary
+    print(f"\n{version}: +{cfg.target_pct:g}% from the next session's open; top {rep.n} each session over "
+          f"{len(rep.sessions)} sessions ({rep.sessions[0]}..{rep.sessions[-1]}); costs {rep.cost_pct:.3f}%")
+    print(f"  every stock            hit {s['base_hit']:.1%}  net {s['base_net']:+.3f}%")
+    for k, label in (("model", "the model's top 5"), ("intraday_volatility", "widest range before"),
+                     ("highest_volatility", "widest 20-day ATR")):
+        if k in s:
+            print(f"  {label:<22} hit {s[k]['hit']:.1%}  net {s[k]['net']:+.3f}%")
+    print("\ncalibration, every symbol-session:")
+    for r in rep.calibration:
+        print(f"  {r['band']:<12} rows {r['rows']:>5}  predicted {r['predicted']:.3f}  hit {r['hit']:.3f}  net {r['net']:+.3f}")
+    bc = rep.band_coverage
+    print(f"\nband ({bc['band']}): outcome at or below p25 {bc['p25']:.1%}, p50 {bc['p50']:.1%}, "
+          f"p75 {bc['p75']:.1%} (a calibrated band gives 25% / 50% / 75%)")
+    for f in rep.filters:
+        print(f"filter {f['rule']}: {f['per_session_point']:.1f} symbols a session, {f['hit']:.1%} reached "
+              f"the target ({f['rows']:,} rows); every symbol: {s['base_hit']:.1%}")
+    if args.json:
+        with open(args.json, "w") as fh:
+            json.dump(rep.to_dict(), fh, indent=1)
+    if args.record:
+        if seen:
+            print("not recorded: the evaluation includes sessions the model trained on", file=sys.stderr)
+            return 1
+        data = rep.to_dict()
         data["model_version"] = version
         print(f"recorded -> {ModelRegistry().save_extra(version, 'evaluation', data)}")
     return 0
@@ -618,9 +791,8 @@ def _live_board(svc, args):
         print("dashboard: no fixed-target model; `train --target 1 --horizon 40` to fill it")
         return LiveBoard(views, svc)
     model, card = reg.load(version)
-    target = asdict(card_target(card))
-    ev = reg.extra_for_target("evaluation", target)
-    se = reg.extra_for_target("screener_evidence", target)
+    ev = reg.extra_like(card, "evaluation")
+    se = reg.extra_for_target("screener_evidence", asdict(card_target(card)))
     print(f"dashboard: {version}; held-out evaluation from {ev[0] if ev else 'none'}; "
           f"screener evidence from {se[0] if se else 'none'}")
     return LiveBoard(views, svc, model, card, version,
@@ -720,6 +892,12 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--calibrate", type=int, default=20, metavar="N",
                     help="with --target: map P to the rate seen on the last N sessions, "
                          "fitted without them (default 20; 0 = off)")
+    tr.add_argument("--next-session", action="store_true",
+                    help="with --target: predict the next session from each stock's state at 15:00, "
+                         "the gain measured from that session's open")
+    tr.add_argument("--recent-days", type=int, metavar="DAYS",
+                    help="train only on the last DAYS calendar days of sessions (e.g. 30 for the last "
+                         "month); the model is named and kept beside the full-history one")
     tr.add_argument("--all-sessions", action="store_true",
                     help="train on the held-out sessions too (for the model you use live, "
                          "after evaluating one trained without them)")
@@ -746,7 +924,27 @@ def build_parser() -> argparse.ArgumentParser:
     su.add_argument("--session", help="a past session instead of today's (YYYY-MM-DD)")
     su.add_argument("--at", help="HH:MM (default: the latest finished candle, up to 15:00)")
     su.add_argument("--json", help="also write the summary as JSON")
+    su.add_argument("--recent", action="store_true",
+                    help="use the model trained on only the last few weeks (train --recent-days)")
+    su.add_argument("--next-session", action="store_true",
+                    help="the session after today (or after --session), from each stock's state at 15:00")
     su.set_defaults(func=cmd_summary)
+
+    su.add_argument("--record", action="store_true",
+                    help="store every stock's prediction, to be scored after the session (scorecard)")
+
+    sc2 = sub.add_parser("scorecard", help="how recorded today.sh / tomorrow.sh picks did")
+    sc2.add_argument("--session", help="the session to score (default: today, or the latest finished)")
+    sc2.add_argument("--days", type=int, metavar="N",
+                     help="instead, each stock's track record over the last N days of recorded picks")
+    sc2.set_defaults(func=cmd_scorecard)
+
+    mo = sub.add_parser("models", help="the trained models: target, training window, held-out result")
+    mo.add_argument("--prune", type=int, metavar="KEEP",
+                    help="delete superseded models, keeping the newest KEEP of each kind "
+                         "(never one with a held-out check kept beside it)")
+    mo.add_argument("--dry-run", action="store_true", help="with --prune: only list what would go")
+    mo.set_defaults(func=cmd_models)
 
     et = sub.add_parser("evaluate-target", parents=[common],
                         help="how often a fixed-target model's top picks reach the target")

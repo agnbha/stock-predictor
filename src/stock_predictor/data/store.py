@@ -72,6 +72,35 @@ _MIGRATIONS: list[str] = [
         UNIQUE (model_version, symbol, ts_epoch, horizon_minutes)
     )
     """,
+    # 4: what today.sh and tomorrow.sh said, every stock, and later what happened
+    """
+    CREATE TABLE summary_pick (
+        id INTEGER PRIMARY KEY,
+        made_at INTEGER NOT NULL,          -- wall clock when the summary ran
+        kind TEXT NOT NULL,                -- 'today' (rest of the session) | 'next' (the session after)
+        model_version TEXT NOT NULL,
+        target_pct REAL NOT NULL,
+        session_date TEXT NOT NULL,        -- the session the prediction is about
+        base_session TEXT NOT NULL,        -- the session whose state it used
+        as_of INTEGER NOT NULL,            -- the minute of that state
+        symbol TEXT NOT NULL,
+        rank INTEGER NOT NULL,             -- by chance, 1 = most likely
+        price REAL NOT NULL,               -- the price at as_of
+        chance REAL,
+        p_model REAL,
+        gain_p25 REAL,
+        gain_p50 REAL,
+        gain_p75 REAL,
+        passed INTEGER NOT NULL,           -- met the run's minimum chance
+        entry_price REAL,                  -- scored: the price at as_of, or the session's open
+        best_gain_pct REAL,                -- scored: the best later high against entry_price
+        close_return_pct REAL,             -- scored: the close against entry_price
+        hit INTEGER,                       -- scored: best_gain_pct reached target_pct
+        scored_at INTEGER,
+        UNIQUE (kind, model_version, session_date, as_of, symbol)
+    );
+    CREATE INDEX summary_pick_session ON summary_pick (session_date, kind);
+    """,
 ]
 
 
@@ -200,6 +229,45 @@ class Store:
             )
 
     # -- intraday signals (model contract) --------------------------
+
+    # -- today.sh / tomorrow.sh picks ---------------------------------------
+
+    SUMMARY_PICK_COLUMNS = ("made_at", "kind", "model_version", "target_pct", "session_date",
+                            "base_session", "as_of", "symbol", "rank", "price", "chance", "p_model",
+                            "gain_p25", "gain_p50", "gain_p75", "passed")
+
+    def save_summary_picks(self, rows: list[dict]) -> int:
+        """Record a summary's predictions; a rerun for the same minute is
+        ignored, so the first one made is the one scored."""
+        cols = self.SUMMARY_PICK_COLUMNS
+        with self.tx() as c:
+            before = c.total_changes
+            c.executemany(
+                f"INSERT OR IGNORE INTO summary_pick ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                [tuple(r.get(k) for k in cols) for r in rows],
+            )
+            return c.total_changes - before
+
+    def summary_picks(self, session_date: str, kind: Optional[str] = None) -> list[dict]:
+        sql = "SELECT * FROM summary_pick WHERE session_date = ?"
+        args: list = [session_date]
+        if kind:
+            sql += " AND kind = ?"
+            args.append(kind)
+        return [dict(r) for r in self._conn.execute(sql + " ORDER BY as_of, rank", args)]
+
+    def summary_pick_sessions(self) -> list[str]:
+        return [r[0] for r in self._conn.execute(
+            "SELECT DISTINCT session_date FROM summary_pick ORDER BY session_date")]
+
+    def score_summary_picks(self, scores: list[dict]) -> None:
+        """scores: {id, entry_price, best_gain_pct, close_return_pct, hit, scored_at}."""
+        with self.tx() as c:
+            c.executemany(
+                "UPDATE summary_pick SET entry_price = :entry_price, best_gain_pct = :best_gain_pct, "
+                "close_return_pct = :close_return_pct, hit = :hit, scored_at = :scored_at WHERE id = :id",
+                scores,
+            )
 
     def save_intraday_signals(self, rows: list[dict]) -> int:
         """Store signals for candles not stored yet; returns how many were written.

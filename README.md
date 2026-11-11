@@ -88,6 +88,12 @@ stock-predictor predict                                             # every symb
 
 # +0.5% at any point before today's close, with the best gain still available
 scripts/today.sh                                                    # the summary, whenever you want it
+scripts/today.sh --recent                                           # from a model of the last 30 days, every minute
+scripts/tomorrow.sh                                                 # how today's picks did, then the next session's
+stock-predictor scorecard --days 30                                 # each stock's record from recorded picks
+scripts/refresh.sh                                                  # the daily refresh (after stock-analyzer's 18:30 batch)
+scripts/schedule-refresh.sh install                                 # run it every weekday at 19:15 (launchd)
+stock-predictor models                                              # what each model was trained on
 stock-predictor train --target 0.5 --to-close --band max-gain --minute-step 3 --all-sessions
 stock-predictor predict --model latest --min-chance 50               # more likely than not
 
@@ -207,10 +213,88 @@ It retrains the model first when a session has finished since it was trained
   on it;
 - `--json FILE`: also write the summary as JSON;
 - `--retrain` or `--no-retrain`: force or skip retraining;
-- `--evaluate`: redo the held-out check.
+- `--evaluate`: redo the held-out check;
+- `--recent` (or `--recent-days N`): use a model trained on only the last 30
+  days, at every minute. It is trained beside the full-history one, and
+  combines with the options above.
 
-It wraps `stock-predictor summary`, which takes the same options except the
-last three.
+It wraps `stock-predictor summary`, which takes the same options except
+`--retrain`, `--no-retrain` and `--evaluate`.
+
+**Training window and minute resolution.** `train --recent-days 30` trains on
+only the last 30 days of sessions, and `--minute-step 1` uses every minute.
+Model names and cards record both (`...-recent30d/`, `...-m3/`), so models
+with different windows sit side by side, and each finds its own held-out
+check. `stock-predictor models` lists what every model was trained on.
+
+On the same held-out month, every variant was trained without it:
+
+| Trained on | Rows | Top 5 reached +0.5% | Net per trade |
+|---|---|---|---|
+| Full history, every 3rd minute | 573k | 68.9% | +0.02% |
+| Full history, every minute | 1.71M | 68.4% | +0.01% |
+| Last 30 days, every minute | 427k | 66.4% | +0.04% |
+| Last 30 days, every 3rd minute | 143k | 66.4% | +0.02% |
+| (the 5 most volatile / any stock) | | 69.5% / 54.5% | −0.02% / +0.03% |
+
+Neither the most recent month nor every minute changes the result; the
+differences are within noise. The band stays too low in all four (the best
+gain beat the median 59–61% of the time). The held-out month was busier than
+the month before it too, so a recent window did not catch up with it. The
+full-history model stays the default. A last-month model has too few
+sessions for the 20-session calibration, so its chance is the raw
+probability.
+
+### Tomorrow, the scorecard and the daily refresh
+
+**`scripts/tomorrow.sh`** (`today.sh --tomorrow`) answers the same question
+for the next session: will each stock trade 0.5% above that session's open
+before its close, and how far could it go? There are no candles for a session
+before it opens, so this model (`train --next-session`) has one row per stock
+and session. Its inputs are the stock's state at 15:00 the session before;
+its label is the next session's high against its open. The next session's
+date comes from stock-analyzer's NSE holiday list.
+
+On the held-out month (21 sessions, a model trained without them):
+
+| Top 5 each session, by | Reached +0.5% above the open | Net per trade |
+|---|---|---|
+| every stock | 73% | −0.06% |
+| the model | 69% | −0.49% |
+| the widest range the session before | **83%** | −0.14% |
+| the widest 20-day ATR | 74% | −0.41% |
+
+Three in four stocks get there anyway. The model's picks did worse than a
+random stock. The widest-range screen found the movers but lost money when
+they missed, so `tomorrow.sh` lists that screen's five as well.
+
+**Track record.** Each pick shows how the model did on that stock in the
+held-out month. "14/18 76%" means it said 50%+ on 18 occasions, the stock got
+there on 14, and its call, yes or no, was right 76% of the time.
+
+**The scorecard.** Both scripts record every run's predictions for every stock
+(`summary --record`; `--no-record` to skip). `tomorrow.sh` opens with how
+today's picks did: for each `today.sh` run, how many picks reached +0.5% from
+the price then, its top 5, and every stock for comparison. It also shows how
+yesterday's `tomorrow.sh` picks did from today's open. Picks are scored once
+the session has closed; before that, the scorecard reports progress so far.
+`stock-predictor scorecard --days 30` gives each stock's record from recorded
+picks.
+
+**The daily refresh.** `scripts/refresh.sh` keeps all of this current. It
+waits until stock-analyzer has stored the day's candles, which its evening
+batch does at 18:30. Then it:
+1. scores the day's recorded picks;
+2. retrains `today.sh`'s and `tomorrow.sh`'s models, and the last-month ones
+   if you use them, building the new session's saved frame on the way;
+3. on Fridays, redoes the held-out checks;
+4. deletes superseded models, keeping three of each kind.
+
+Each step does nothing if it is already done, and the log is
+`data/logs/refresh.log`. `scripts/schedule-refresh.sh install` runs it every
+weekday at 19:15 with launchd, as stock-analyzer schedules its own jobs.
+`status` and `uninstall` check and remove it. A run missed while the machine
+slept starts when it wakes.
 
 ### The dashboard
 
@@ -331,7 +415,9 @@ src/stock_predictor/
 │                    dashboard page, log of stock-analyzer's requests
 └── cli.py           build-features | train | predict | summary | evaluate | evaluate-target
                      | screener-evidence | backtest | ablate | params | frames | serve | score
-scripts/today.sh     the on-demand summary: retrains when stale, then `summary`
+scripts/today.sh     the on-demand summary: retrains when stale, records, then `summary`
+scripts/tomorrow.sh  the next session's summary, after today's scorecard (today.sh --tomorrow)
+scripts/refresh.sh   the daily refresh; schedule-refresh.sh installs it in launchd
 
 tests/               leakage, targets, splits, metrics, charges, baselines,
                      feature parity (vs stock-analyzer's pinned fixture), aggregation, API,
@@ -381,5 +467,5 @@ tests/               leakage, targets, splits, metrics, charges, baselines,
 ## Tests
 
 ```bash
-pytest -q          # 87 tests; those needing stock-analyzer's DB skip cleanly without it
+pytest -q          # 98 tests; those needing stock-analyzer's DB skip cleanly without it
 ```

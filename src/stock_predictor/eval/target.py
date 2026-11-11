@@ -32,6 +32,21 @@ STRATEGIES = ("model", "intraday_volatility", "highest_volatility")
 CALIBRATION_EDGES = (0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 1.0)
 
 
+def by_symbol_record(rows, chance_col: str = "chance") -> dict[str, dict]:
+    """Each stock's track record over the evaluated sessions: how often it was
+    checked, how often the model said 50%+ and how often it then reached the
+    target, how often the call (yes at 50%+, else no) was right, and how often
+    the stock reached the target at all."""
+    out = {}
+    for sym, g in rows.groupby("symbol"):
+        yes = g[chance_col] >= 0.5
+        hit = g["hit"].astype(bool)
+        out[str(sym)] = {"checks": int(len(g)), "said_yes": int(yes.sum()),
+                         "yes_reached": int((yes & hit).sum()), "right": int((yes == hit).sum()),
+                         "reached": int(hit.sum())}
+    return out
+
+
 def default_points(cfg: TripleBarrierConfig, step_minutes: int = 15) -> list[time]:
     """09:30, then every ``step_minutes`` while the window still ends inside
     the session (to 15:00 for a window that runs to the close)."""
@@ -65,12 +80,14 @@ class TargetReport:
     summary: dict
     band_coverage: Optional[dict] = None  # share of outcomes at or below the predicted p25/p50/p75
     filters: list = ()                    # "keep the symbols that ..." rules and how they did
+    by_symbol: Optional[dict] = None      # each stock's track record (by_symbol_record)
 
     def to_dict(self) -> dict:
         return {
             "target": self.cfg.describe(), "sessions": [self.sessions[0], self.sessions[-1]],
             "session_count": len(self.sessions), "top_n": self.n, "cost_pct": self.cost_pct,
             "summary": self.summary, "band_coverage": self.band_coverage, "filters": list(self.filters),
+            "by_symbol": self.by_symbol,
         }
 
 
@@ -173,4 +190,6 @@ def evaluate_target(
         if len(k):
             filters.append({"rule": rule, "rows": int(len(k)), "per_session_point": len(k) / points_seen,
                             "hit": float(k["hit"].mean()), "net": float(k["net"].mean())})
-    return TargetReport(cfg, used, n, cost, by_point, calibration, summary, coverage, filters)
+    rows["chance"] = rows["p_seen"].fillna(rows["p"])
+    return TargetReport(cfg, used, n, cost, by_point, calibration, summary, coverage, filters,
+                        by_symbol_record(rows))
