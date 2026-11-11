@@ -333,9 +333,12 @@ sessions (2026-09-07 to 2026-10-06), at T1:
 
 Every 5th minute scores 0.06 percentage points lower, which twenty sessions
 cannot distinguish from noise. The ranking's default stays at every minute.
-The fixed-target models train on every 3rd minute: on all 111 sessions that is
-~724,000 rows and a ~2.3 GB peak. A fit of classifier, band and calibration
-takes ~2–5 minutes. For +0.5% before the close on 90 development sessions:
+The models the scripts use train on every finished session. `today.sh`'s
+model uses every minute: on 110 sessions that is 2,158,922 rows, a 4.2 GB peak
+and about 3 minutes for classifier, band and calibration. `tomorrow.sh`'s
+model has one row per stock-session (~6,200) and fits in seconds. The daily
+refresh retrains both. For +0.5% before the close on 90 development sessions,
+the variants compared:
 
 | | Rows | Peak memory | Time |
 |---|---|---|---|

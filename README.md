@@ -88,7 +88,6 @@ stock-predictor predict                                             # every symb
 
 # +0.5% at any point before today's close, with the best gain still available
 scripts/today.sh                                                    # the summary, whenever you want it
-scripts/today.sh --recent                                           # from a model of the last 30 days, every minute
 scripts/tomorrow.sh                                                 # how today's picks did, then the next session's
 stock-predictor scorecard --days 30                                 # each stock's record from recorded picks
 scripts/refresh.sh                                                  # the daily refresh (after stock-analyzer's 18:30 batch)
@@ -213,21 +212,23 @@ It retrains the model first when a session has finished since it was trained
   on it;
 - `--json FILE`: also write the summary as JSON;
 - `--retrain` or `--no-retrain`: force or skip retraining;
-- `--evaluate`: redo the held-out check;
-- `--recent` (or `--recent-days N`): use a model trained on only the last 30
-  days, at every minute. It is trained beside the full-history one, and
-  combines with the options above.
+- `--evaluate`: redo the held-out check.
 
 It wraps `stock-predictor summary`, which takes the same options except
 `--retrain`, `--no-retrain` and `--evaluate`.
 
-**Training window and minute resolution.** `train --recent-days 30` trains on
-only the last 30 days of sessions, and `--minute-step 1` uses every minute.
-Model names and cards record both (`...-recent30d/`, `...-m3/`), so models
-with different windows sit side by side, and each finds its own held-out
-check. `stock-predictor models` lists what every model was trained on.
+**What the models are trained on.** The models `today.sh` and `tomorrow.sh`
+use train on every finished session stock-analyzer has. `today.sh`'s model
+uses every minute of each session, about 2.5 million rows; `tomorrow.sh`'s
+uses every stock-session. The daily refresh retrains both after each new
+session. The only model that leaves anything out is the twin behind "how much
+to trust it" and the "Last month" column. It is trained on everything except
+the latest 21 sessions, because those are what it is tested on.
+`stock-predictor models` lists what every model was trained on.
 
-On the same held-out month, every variant was trained without it:
+Training on only the latest month was tested and is not used. `train
+--recent-days N` remains in the CLI for experiments; the scripts never pass
+it. On the same held-out month, every variant was trained without it:
 
 | Trained on | Rows | Top 5 reached +0.5% | Net per trade |
 |---|---|---|---|
@@ -241,9 +242,7 @@ Neither the most recent month nor every minute changes the result; the
 differences are within noise. The band stays too low in all four (the best
 gain beat the median 59–61% of the time). The held-out month was busier than
 the month before it too, so a recent window did not catch up with it. The
-full-history model stays the default. A last-month model has too few
-sessions for the 20-session calibration, so its chance is the raw
-probability.
+scripts train on the full history, at every minute.
 
 ### Tomorrow, the scorecard and the daily refresh
 

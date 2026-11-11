@@ -4,8 +4,8 @@
 #   1. waits (up to --wait minutes, default 120) until stock-analyzer's evening batch has
 #      stored today's session; a day with no session (weekend, holiday) skips straight on
 #   2. scores the picks today.sh and tomorrow.sh recorded about today (stock-predictor scorecard)
-#   3. retrains the models today.sh and tomorrow.sh use on every finished session, and the
-#      last-month ones if you use them; the new session's saved frame is built on the way
+#   3. retrains the models today.sh and tomorrow.sh use on every finished session stock-analyzer
+#      has (today.sh's at every minute); the new session's saved frame is built on the way
 #   4. on Fridays, or with --evaluate, redoes the held-out checks behind "how much to trust it"
 #   5. deletes superseded models, keeping the newest 3 of each kind (--keep N)
 #
@@ -87,15 +87,6 @@ say "today.sh's model"
 scripts/today.sh --target "$target" --train-only --no-record
 say "tomorrow.sh's model"
 scripts/today.sh --target "$target" --tomorrow --train-only --no-record
-for flags in "--recent" "--recent --tomorrow"; do
-  # the last-month models only if one was ever trained
-  in_use="$("$py" -c "from stock_predictor.serving.summary import find_model; from stock_predictor.models import ModelRegistry; print(bool(find_model(ModelRegistry(), $target, True, '--tomorrow' in '$flags')))")"
-  if [ "$in_use" = True ]; then
-    say "last-month model ($flags)"
-    # shellcheck disable=SC2086
-    scripts/today.sh --target "$target" $flags --train-only --no-record
-  fi
-done
 
 # 4. The held-out checks: the last 21 sessions move on every day.
 if [ "$evaluate" = 1 ]; then

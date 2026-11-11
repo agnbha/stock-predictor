@@ -428,12 +428,15 @@ mapped, isotonically, to how often they came true. The model is then refitted
 on everything and keeps that map. Every answer shows both numbers, and the
 model card keeps the table.
 
-The training window is the full history by default. `--recent-days N` trains
-on only the last N days, for a model that follows the current regime more
-closely. `--minute-step K` keeps every K-th minute. Neither the last month nor
-every minute instead of every 3rd changed held-out results measurably
-(section 6.1). The model's name and card record both, and the three quantiles
-are sorted per row, since separately fitted ones can cross.
+The models in use train on every finished session stock-analyzer has, and
+the same-day model on every minute of each: all the data points there are. It
+is retrained after each new session (section 7). Only the held-out twin leaves
+the latest 21 sessions out, so that it can be tested on them. Training on only
+the last N days (`--recent-days N`) and on every K-th minute (`--minute-step
+K`) were tested; neither changed held-out results measurably (section 6.1),
+and the scripts use neither. The model's name and card record the window and
+step, and the three quantiles are sorted per row, since separately fitted
+ones can cross.
 
 This stage sees millions of examples. It is where any real signal will be
 found, and it is trained without ever knowing what a "top five" is. LightGBM is
