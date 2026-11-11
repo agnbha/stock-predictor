@@ -1,0 +1,42 @@
+name: Python package
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    # Pinned rather than ubuntu-latest, so a new runner image cannot drop Python 3.9.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the project's minimum (pyproject.toml) and what it is developed on.
+        python-version: ["3.9", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        # The project installs with pip from pyproject.toml. scikit-learn rather than
+        # LightGBM, so the GBDT backend is the same one development uses.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[store,serving,dev]" scikit-learn flake8
+
+      - name: Lint with flake8
+        run: |
+          # Stop the build on syntax errors or undefined names.
+          flake8 src tests --count --select=E9,F63,F7,F82 --show-source --statistics
+          # Everything else is reported, not enforced.
+          flake8 src tests --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: Test with pytest
+        # stock-analyzer's database is not in CI: tests that need it skip.
+        run: pytest -q
