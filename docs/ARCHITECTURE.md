@@ -1,9 +1,10 @@
-# Stock Predictor — modules, storage and daily churn
+# Stock Predictor — Architecture
 
-A companion to [DESIGN.md](DESIGN.md). It shows how the code is split into
-modules, where each piece of data is kept, and how much is written each
-session. All figures were measured on 2026-11-05, with 62 symbols and 108
-completed sessions.
+A companion to [DESIGN.md](DESIGN.md), which says what is predicted and why.
+This page shows how the code is split into modules, how data moves through
+them, where each piece of data is kept, what each session writes, and the
+rules the code relies on. Figures were measured with 62 symbols and 108–111
+finished sessions.
 
 ---
 
@@ -13,16 +14,17 @@ completed sessions.
 flowchart TB
   subgraph SA["stock-analyzer · Java · separate repo"]
     ingest["Ingestion and live monitor<br/>polls every 150 s, 09:15–15:30"]
-    monitor["Signal client<br/>model.enabled = false today"]
+    monitor["Signal client<br/>off until model.enabled = true"]
   end
 
-  adb[("stock-analyzer.db<br/>SQLite · 172 MB<br/>read-only from stock-predictor")]
+  adb[("stock-analyzer.db<br/>SQLite · ~176 MB<br/>read-only from stock-predictor")]
 
   subgraph SP["stock-predictor · Python"]
     subgraph INPUTS["Inputs"]
-      reader["data/analyzer.py<br/>AnalyzerViews"]
+      reader["data/analyzer.py<br/>AnalyzerViews · finished or live"]
+      scr["data/screener.py<br/>screener data · monitor activity"]
       params["params.py<br/>candidate-input switches"]
-      stubs["fundamentals/ · news/<br/>stubs, phases 7–8"]
+      stubs["fundamentals/ · news/<br/>interfaces only"]
     end
 
     subgraph BUILD["Features and targets"]
@@ -33,18 +35,20 @@ flowchart TB
     subgraph MODELS["Models"]
       trainset["models/training.py<br/>FrameSource · training_set<br/>labels attached on load"]
       fstore["data/framestore.py<br/>keyed by feature set,<br/>code and data"]
-      stage1["Stage 1 · models/<br/>forward · gbdt"]
-      registry["models/registry.py"]
+      stage1["Stage 1 · models/<br/>barrier labels · forward · gbdt<br/>calibration"]
+      registry["models/registry.py<br/>card + kept results"]
       stage2["Stage 2 · models/rank.py<br/>aggregate · calibrate<br/>then filters.py"]
     end
 
-    evalm["eval/<br/>splits · baselines · charges<br/>metrics · backtest · ablation"]
+    evalm["eval/<br/>splits · baselines · charges · metrics<br/>backtest · ablation · target · screener"]
 
     subgraph SERVING["Serving"]
       sched["serving/scheduler<br/>24 points a session"]
-      svc["serving/service"]
+      board["serving/live · LiveBoard<br/>every symbol, every minute"]
+      summary["serving/summary<br/>predict · summary · scripts/today.sh"]
+      svc["serving/service<br/>+ request log"]
       cache["serving/cache<br/>latest ranking, in memory"]
-      app["serving/app · FastAPI"]
+      app["serving/app · FastAPI<br/>API + /dashboard"]
     end
 
     store["data/store.py"]
@@ -52,37 +56,47 @@ flowchart TB
 
   toml[/"params file or --set overrides"/]
   frames[("data/frames/<br/>Parquet, one file per session<br/>per feature set")]
-  art[("artifacts/<br/>model.pkl + card.json<br/>one folder per version")]
+  art[("artifacts/<br/>model.pkl · card.json<br/>evaluation · screener evidence")]
   pdb[("data/stock-predictor.db<br/>SQLite")]
-  client(["API consumers"])
+  client(["API consumers · browser · terminal"])
 
   ingest -->|"writes"| adb
-  adb -->|"seven views + hot_window"| reader
+  adb -->|"views, finished sessions<br/>and the session in progress"| reader
+  adb -->|"screener and activity views"| scr
   reader --> feats
   reader --> labels
   toml --> params
   params --> feats
   params --> stage2
   stubs -.-> feats
-  feats -->|"completed sessions"| trainset
+  feats -->|"finished sessions"| trainset
   trainset --> fstore
   fstore --> frames
   trainset -->|"one matrix"| stage1
   stage1 --> registry
   registry --> art
-  art -->|"load"| svc
-  trainset -->|"frames cut to T"| stage2
-  feats -->|"session in progress"| stage2
-  stage2 --> evalm
+  trainset -->|"frames cut to T"| evalm
+  stage2 -->|"evaluate --model"| evalm
+  scr -->|"screener-evidence"| evalm
+  evalm -->|"evaluate-target --record"| art
   labels -->|"realised gains"| evalm
+  art -->|"load"| svc
+  art -->|"fixed-target model,<br/>evaluation, evidence"| board
+  art --> summary
+  feats -->|"session in progress"| stage2
+  feats -->|"session in progress"| board
+  feats -->|"session in progress"| summary
+  scr --> board
   sched --> svc
   svc --> stage2
   svc --> cache
   cache --> app
+  board -->|"/dashboard"| app
   svc --> store
   evalm -->|"metrics, on request"| store
   store --> pdb
   app --> client
+  summary --> client
   monitor -->|"POST /predict/intraday"| app
 
   classDef dashed stroke-dasharray: 5 5
@@ -93,52 +107,130 @@ flowchart TB
 How to read it:
 
 - **Data enters from one place.** `data/analyzer.py` is the only module that
-  touches stock-analyzer's database. It opens the file read-only. It reads six
-  views (`v_intraday_candles`, `v_daily_candles`, `v_opportunity_markers`,
-  `v_symbol_trend`, `v_market_breadth`, `v_symbol_beta`) and one base table,
-  `hot_window`, for the time-of-day baseline.
-- **The session in progress comes from a seventh view.** stock-analyzer writes
-  a day's candles to `v_intraday_candles` only after the close. During the
-  session its daemon records each finished minute in `live_candle`, which
-  `v_intraday_merged` combines with the finished sessions. `serve` and
-  `predict` open the views with `live=True`, which reads today from that view
-  and leaves out the candle still forming. Everything else a feature needs
-  comes from sessions before today.
-- **Completed sessions go through saved frames.** `models/training.py` reads
-  each completed session's feature frame from `data/frames/`. If a frame is
-  missing or out of date, it builds the frame and saves it (`--jobs`
-  processes at once). Labels for the target being trained are attached on
-  load, from the session's full minute candles. `train` turns the frames into
-  one matrix. `evaluate --model`, `evaluate-target` and `ablate --model` cut
-  them back to their prediction point. The session in progress never touches
-  the store; serving builds its frame fresh at each point.
+  reads stock-analyzer's feature data. It reads the views in DESIGN 3.1 and
+  one base table, `hot_window`, for the time-of-day baseline. With
+  `live=True`, it reads today's session from `v_intraday_merged` and leaves
+  out the candle still forming. `serve`, `predict`, `summary` and the live
+  board read live; training and evaluation read finished sessions.
+- **Screener data is shown and measured, never used as a feature.**
+  `data/screener.py` reads stock-analyzer's fundamentals, CANSLIM runs,
+  bullish score, watchlist, trades, holdings and monitor heartbeat. It is a
+  separate module from `data/analyzer.py`, so changing it never invalidates
+  the saved frames.
+- **Finished sessions go through saved frames** (section 2.1). The session in
+  progress never does: it changes every minute, so its frame is built fresh.
+- **Models keep their evidence beside them.** A model's folder holds its
+  pickled trees and a card, and may also hold:
+  - its held-out evaluation;
+  - its screener evidence.
+
+  The card records the features, parameters, minute step, target, band and
+  calibration. A model used live finds the evidence through the twin model
+  trained on the same target without the held-out month.
 - **Dashed boxes** are either outside this repo or not doing anything yet.
-  `fundamentals/` and `news/` return nothing. stock-analyzer's signal client is
-  switched off (`model.enabled=false` in its `application.properties`).
-- **`cli.py`** is not drawn. Each of its commands calls into one of the boxes
-  above.
+  `fundamentals/` and `news/` return nothing. stock-analyzer's signal client
+  stays on its own time-of-day prior until `model.enabled=true` in its
+  `application.properties`.
+- **`cli.py`** is not drawn. Each command calls into one of the boxes above.
 
 ---
 
-## 2. Where the data is stored
+## 2. Data flows
 
-| Store | Location (override) | Written by | Holds | Size today |
+### 2.1 Training and evaluation
+
+```
+finished sessions ──► FrameSource ──► saved feature frame (build once, ~7 s; read back in ~0.04 s)
+                                         │
+                       labels for the target, attached on load from the session's full candles
+                                         │
+                       training_set: one column-major float64 matrix, complete windows only,
+                                     every K-th minute (--minute-step)
+                                         │
+                       fit: classifier + quantile band (+ calibration on the last 20 sessions)
+                                         │
+                       artifacts/<version>/  model.pkl · card.json
+```
+
+- **A saved frame holds features only, one Parquet file per session.** It is
+  used only if three things match:
+  - **feature set**: which candidate inputs are on as features;
+  - **code**: a hash of `features/`, `data/analyzer.py`,
+    `data/framestore.py`, `clock.py` and `params.py`, so no version needs
+    bumping;
+  - **data**: a hash chained through every session's minute and daily candles
+    up to and including that one. If stock-analyzer rewrites an old session,
+    that frame and every later one are rebuilt.
+
+  Missing frames are built in `--jobs` processes; `--no-frame-cache` builds
+  without saving.
+- **Labels never touch the frames.** They are attached on load (well under a
+  second per session), so a new target, horizon or band reuses every frame.
+  Label code lives outside the fingerprinted files for that reason.
+- **Evaluation reuses the same frames.** `evaluate --model`, `ablate --model`,
+  `evaluate-target` and `screener-evidence` cut each one back to their
+  prediction point. That is exact because every row depends only on candles
+  at or before its own minute (DESIGN 2).
+
+### 2.2 The session in progress
+
+```
+stock-analyzer daemon ──► live_candle ──► v_intraday_merged
+                                              │  (finished candles only)
+                              latest minute ≥ 90% of symbols have finished
+                                              │
+                              build_feature_frame(today, that minute)
+                                              │
+               predict · summary · live board · scheduled ranking
+```
+
+The live board refreshes every 20 s and recomputes only when the finished
+minute moves. Each refresh takes about 6 s for 62 symbols, including the
+"what moved it" sweep: each input group is set to the median stock's value,
+and the batch is re-scored in one call.
+
+### 2.3 The scheduled ranking
+
+```
+scheduler (T0, T1, every 15 min) ──► recompute ──► cache ──► /predictions/top
+                                          └──► prediction table ──► score (next day)
+```
+
+With no ranking model served, the recompute falls back to the
+`highest_volatility` baseline and labels the answer with that version.
+
+### 2.4 stock-analyzer's signal requests
+
+```
+stock-analyzer monitor ──► POST /predict/intraday (every tracked symbol, every poll)
+                               │
+                 request log (per symbol)  ·  intraday_signal (one row per candle, first answer kept)
+```
+
+---
+
+## 3. Where the data is stored
+
+| Store | Location (override) | Written by | Holds | Size |
 |---|---|---|---|---|
-| **stock-analyzer database** | `../stock-analyzer/data/stock-analyzer.db` (`STOCK_ANALYZER_DB`) | stock-analyzer only | Minute candles, daily bars, opportunity labels, live session state | 172 MB, plus 15 MB of uncheckpointed WAL during today's session |
-| **stock-predictor database** | `data/stock-predictor.db` (`STOCK_PREDICTOR_DB`) | `serve`, `score`, `evaluate --record` | Tables `prediction`, `intraday_signal`, `metric_run` | Does not exist yet: nothing has run `serve` |
-| **Saved training frames** | `data/frames/<feature set>/` (`STOCK_PREDICTOR_FRAMES`) | `train`, `evaluate --model`, `evaluate-target`, `ablate --model` | Each completed session's feature frame, as Parquet. No labels: every target shares them | About 7 MB per session, so ~0.8 GB for 109 sessions |
-| **Model artefacts** | `artifacts/<version>/` (`STOCK_PREDICTOR_ARTIFACTS`) | `train` | `model.pkl` (pickled trees) and `card.json` (features, params, minute step, target, calibration) | One model is 2.7 MB |
-| **Prediction cache** | Memory of the `serve` process | The scheduler | The latest ranking only | Under 1 KB |
-| **Training matrix** | Memory of `train` | `train` | One float64 matrix of features, plus labels | See section 4 |
+| **stock-analyzer database** | `../stock-analyzer/data/stock-analyzer.db` (`STOCK_ANALYZER_DB`) | stock-analyzer only | Minute candles, daily bars, opportunity labels, screener data, live session state | ~176 MB, plus up to ~15 MB of WAL during a session |
+| **stock-predictor database** | `data/stock-predictor.db` (`STOCK_PREDICTOR_DB`) | `serve`, `score`, `evaluate --record` | Tables `prediction`, `intraday_signal`, `metric_run` | Small; grows with `serve` (section 4) |
+| **Saved training frames** | `data/frames/<feature set>/` (`STOCK_PREDICTOR_FRAMES`) | `train`, `evaluate*`, `ablate --model`, `screener-evidence` | Each finished session's feature frame, as Parquet. No labels: every target shares them | ~7 MB per session: 648 MB for 111 sessions |
+| **Model artefacts** | `artifacts/<version>/` (`STOCK_PREDICTOR_ARTIFACTS`) | `train`, `evaluate-target --record`, `screener-evidence --record` | `model.pkl`, `card.json`, and `evaluation.json` / `screener_evidence.json` when recorded | ~2.7 MB per model |
+| **Prediction cache** | Memory of `serve` | The scheduler | The latest ranking | Under 1 KB |
+| **Live board** | Memory of `serve` | The board's thread | The latest snapshot of every symbol | ~200 KB of JSON |
+| **Request log** | Memory of `serve` | `POST /predict/intraday` | Per-symbol request counts and last answers | Small |
+| **Training matrix** | Memory of `train` | `train` | One float64 matrix of features, plus labels | Section 5 |
 | **Parameters** | `params.example.toml` or your own file (`STOCK_PREDICTOR_PARAMS`) | You | Candidate-input switches (DESIGN 4.1) | — |
 
 Everything under `data/` and `artifacts/` is git-ignored. `stock-predictor
 frames` lists the saved frames and their disk use. They are a cache: deleting
-`data/frames/` costs only the time to rebuild them.
+`data/frames/` costs only the time to rebuild them, about 2 minutes on 5
+processes.
 
 ---
 
-## 3. Daily churn
+## 4. Daily churn
 
 ### stock-analyzer.db, written by stock-analyzer
 
@@ -152,72 +244,57 @@ frames` lists the saved frames and their disk use. They are a cache: deleting
 
 Some tables are overwritten instead of growing:
 
-- `live_candle` holds only the running session (22,425 rows, 2.2 MB).
-- `live_opportunity` is replaced on every poll.
+- `live_candle` holds only the running session (~22,000 rows, ~2.2 MB by the
+  close);
+- `live_opportunity` is replaced on every poll;
 - `hot_window` (2,372 rows) is recomputed once a day.
 
-These overwrites are why the WAL had reached 15 MB by 15:29 today.
+These overwrites are why the WAL reaches ~15 MB by the close.
 
 Over about 250 sessions a year, that comes to roughly **360 MB a year**. At the
-current universe, the database doubles in under six months. Each symbol
-added costs about 19 KB per session.
+current universe, the database doubles in about six months. Each symbol added
+costs about 19 KB per session.
 
 ### stock-predictor's own writes
 
 | What | Per session | Notes |
 |---|---|---|
 | `prediction` | 120 rows (24 points × 5 picks), ~25 KB | `score` updates each row once the next day. About 6 MB a year |
-| `intraday_signal` | 0 today | Stays empty until stock-analyzer switches `model.enabled` on. Then one row per symbol per candle: 23,250 rows, 1.8 MB (~450 MB a year) |
-| Saved training frames | ~7 MB per feature set in use | Written once, the first time a completed session is used. About 1.8 GB a year for each feature set kept |
+| `intraday_signal` | 0 while stock-analyzer's model client is off | Then one row per symbol per candle: 23,250 rows, 1.8 MB (~450 MB a year) |
+| Saved training frames | ~7 MB per feature set in use | Written once, the first time a finished session is used. About 1.8 GB a year for each feature set kept |
 | `metric_run` | Only on `evaluate --record` | A few KB per run |
-| `artifacts/` | 2.7 MB per retrain, not per session | Old versions are never deleted. Retraining monthly adds ~33 MB a year |
+| `artifacts/` | ~2.7 MB per model trained, not per session | Old versions are never deleted. `today.sh` retrains after each finished session, so ~0.7 GB a year if run daily |
 
-The saved frames are now the largest thing stock-predictor writes. They
-total about five times the growth of stock-analyzer's database, for one
-feature set. They are float64 so that a saved frame is exactly what a fresh
-build would give. zstd compression gets them to about half their in-memory
-size; other Parquet settings made no difference.
+The saved frames are the largest thing stock-predictor writes: about five
+times the growth of stock-analyzer's database, per feature set. They are
+float64, so a saved frame is exactly what a fresh build would give. zstd
+compression gets them to about half their in-memory size; other Parquet
+settings made no difference.
 
 The `prediction` and `intraday_signal` figures come from writing simulated
 sessions through `Store` into a scratch database.
 
 ---
 
-## 4. Changes made on 2026-11-05
+## 5. Performance and memory
 
-The first version of this page found two problems: signal storage rewriting
-almost everything it kept, and training memory that grows without bound.
-Both are fixed. Fixing the second exposed a leak in the training frames.
+**Signals are written once.** stock-analyzer re-sends each symbol's whole
+session so far on every 150-second poll. `save_intraday_signals` inserts only
+candles it has not stored, and keeps the first signal computed for each. A full
+session writes 23,250 rows; rewriting every re-sent candle would have meant
+1,753,050. A re-send never resets a filled `realized_return_pct`.
 
-| | Before | After |
-|---|---|---|
-| `intraday_signal` rows written per session, once switched on | 1,753,050 | 23,250, one per candle |
-| Assembling 20 sessions for `train` | 122 s, rebuilt every time | 1.6 s from saved frames, plus ~1.3 s once per run to check them |
-| Peak memory, training on 20 sessions (macOS footprint) | 1,806 MB | 1,478 MB every minute; 753 MB every 5th minute |
-| Training rows that saw the 15:00 close | Every row before 15:00 | None |
+**Saved frames make training cheap to repeat.** Assembling 20 sessions takes
+122 s when every frame is built, and 1.6 s from saved frames, plus ~1.3 s per
+run to check that each one is current.
 
-**Signals are written once.** stock-analyzer sends each symbol's completed
-candles for the whole session so far on every 150-second poll.
-`save_intraday_signals` used to rewrite all of them. Now it inserts only
-candles it has not stored, and keeps the first signal computed for each. A
-re-send also no longer resets a filled `realized_return_pct` to empty.
+**The training matrix is built compactly.** Each session goes straight into
+one column-major float64 array. scikit-learn copies a row-major matrix into
+that layout before fitting, so building it that way avoids a full-size copy.
+With 20 sessions, peak memory (macOS footprint) is 1,478 MB at every minute and
+753 MB at every 5th minute; concatenating DataFrames first peaked at 1,806 MB.
 
-**Training frames are saved per session.** A frame is reused only if it was
-built from the same feature set, the same frame-building code (a hash of the
-source files, so no version needs bumping), and the same data. The data
-check is a hash chained through every session's minute and daily candles up
-to and including that one. If stock-analyzer rewrites an old session, that
-frame and every later one are rebuilt. `--no-frame-cache` turns all of this
-off.
-
-**The training matrix is built compactly.** It used to be a DataFrame per
-session, concatenated, then copied into a matrix. Now each session goes
-straight into one column-major float64 array. scikit-learn copies a
-row-major matrix into that layout before fitting, so building it that way
-avoids a full-size copy. `train --minute-step K` keeps every K-th minute after the open.
-The model card records K.
-
-**Every minute or every 5th?** Both models were trained on the same 46
+**Every minute or every 5th?** Two stage-1 models were trained on the same 46
 development sessions (2026-06-02 to 2026-08-05) and scored on 20 later
 sessions (2026-09-07 to 2026-10-06), at T1:
 
@@ -231,79 +308,65 @@ sessions (2026-09-07 to 2026-10-06), at T1:
 | Precision@5 / NDCG@5 | 0.20 / 0.40 | 0.19 / 0.37 |
 | Adverse rate | 24% | 22% |
 
-Every 5th minute scores 0.06 percentage points lower. Twenty sessions are too
-few to tell whether that difference is real. The default stays at every minute
-until a walk-forward comparison over more sessions settles it. Both models
-trail `highest_volatility`, which made 2.43% on the same sessions. With only
-46 training sessions, that does not settle anything about the model either.
+Every 5th minute scores 0.06 percentage points lower, which twenty sessions
+cannot distinguish from noise. The ranking's default stays at every minute.
+The fixed-target models train on every 3rd minute: on all 111 sessions that is
+~724,000 rows and a ~2.3 GB peak. A fit of classifier, band and calibration
+takes ~2–5 minutes.
 
 At every minute, peak memory is about 2.9 times the matrix, because of
-scikit-learn's own copies; it was about 4 times before. Projected to all 108
-sessions, training would peak at roughly 4 GB at every minute (about 5.5 GB
-before these changes) and about 1.3 GB at every 5th minute.
+scikit-learn's own copies. Training the ranking on all sessions at every minute
+would peak near 4 GB.
 
-**The leak.** Saved frames are only correct if each row's values don't
-depend on how late the frame was built. Checking that turned up two features
-that broke the leakage rule. The distances from the 5-, 20- and 50-day
-averages used the build-time close, so in a frame built to 15:00, every 09:30
-row knew the day's 15:00 price. The regime clock was 345 minutes on every
-row. Both are now computed per row. Beta is now computed point-in-time as
-well (DESIGN section 4). Any model trained before this change learned from
-the leaked values and should be retrained.
-
-## 5. Changes made on 2026-11-06
-
-Training a model for a fixed target (+1% within 40 minutes) and running it on
-the live session turned up three problems with reading the session in
-progress, and one with labels:
-
-- **Reading during market hours could fail.** The connection was opened with
-  `immutable=1`, which tells SQLite the file never changes. While
-  stock-analyzer's daemon is writing, that returns stale pages. A long read
-  (an evaluation over 108 sessions) failed with "database disk image is
-  malformed" twice at 14:30 today. The connection is now plain read-only.
-- **`serve` never used its model during a session.** Today's candles reach
-  `v_intraday_candles` only after the close, so every recompute at 09:30 to
-  15:00 found no features and silently served the `highest_volatility`
-  baseline instead. `serve` now reads the session in progress from
-  `v_intraday_merged` (section 1).
-- **Labels stopped at 15:00.** Frames run to the last prediction point, and
-  labels were computed from the frame's own candles, so a 14:45 row's window
-  ended at 15:00, not 15:15. Labels are now attached from the session's full
-  candles, and a row whose window runs past 15:29 is not trained on. Windows
-  are measured in clock minutes, so a minute with no trades no longer
-  stretches a window. When one candle reaches both barriers, the row now
-  counts as stopped, because the order inside the candle is unknown.
-- **The newest live minute is usually partial.** stock-analyzer writes the
-  session a symbol at a time, and polls two symbols more often than the rest.
-  At 14:45 the newest finished minute (14:44) held 2 of 62 symbols, so
-  predicting "now" ranked those 2 against each other in the cross-sectional
-  features. `predict` now uses the latest minute at least 90% of symbols have
-  finished, which runs about 3 minutes behind the clock.
-- **A new target rebuilt every frame.** Labels were saved inside the frames,
-  and a different target meant 13 minutes of rebuilding. Frames now hold
-  features only, and a missing frame is built in `--jobs` processes: 109
-  sessions in about 2 minutes on 5.
+**First builds are the slow part**, at 6–9 s per session. Most of that is the
+same-minute volume profiles (3.0 s) and the cross-sectional ranks (2.2 s, which
+use Python's `statistics` module). Parallel builds hide it for training (~2
+minutes for 111 sessions on 5 processes); live builds take it every refresh.
 
 ---
 
-## 6. Still open
+## 6. Rules the code relies on
 
-- **The scheduler can hit a partial minute too.** `serve` recomputes at fixed
-  points (09:30, 09:45, ...). A recompute that fires before stock-analyzer has
-  written that minute for most symbols builds the cross-section from the
-  symbols it has. It should wait for the minute, as `predict` does.
-- **The +1% / 40-minute model is overconfident above about 20%** and does not
-  beat ranking by current volatility (README). `predict` shows the calibrated
-  figure; the model itself has not been tuned.
+- **Read-only, never immutable.** stock-analyzer's daemon writes all session
+  long. A connection opened as `immutable` reads stale pages and, once a
+  checkpoint rewrites them mid-read, fails with "database disk image is
+  malformed". The connection is plain `mode=ro`.
+- **One SQLite connection per thread.** The scheduler and the live board each
+  have their own. A connection shared by two threads at once slows both to a
+  crawl.
+- **"Now" is the latest minute 90% of symbols have finished** (DESIGN 2), not
+  the newest candle of any symbol.
+- **Every row depends only on candles at or before its own minute.** Saved
+  frames, the cut-back evaluation and live builds all assume it; a test
+  enforces it.
+- **Labels come from the session's full candles, in clock minutes.** A window
+  that runs past the last candle is not trained on; a tie inside one candle
+  counts as stopped.
+- **The ground truth of a fixed target is the candles.** It needs no detector,
+  so it uses every finished session. The ranking uses only sessions with final
+  labels from the configured detector.
 
-- **Disk for saved frames.** About 7 MB per session per feature set, so
-  ~0.8 GB today and about 1.8 GB more each year. Delete
-  `data/frames/<feature set>/` for feature sets no longer in use.
-- **The first build is still slow,** at 6–9 s per session. Most of that is the
-  same-minute volume profiles (3.0 s) and the cross-sectional ranks (2.2 s,
-  which use Python's `statistics` module). Vectorising them would shorten
-  first builds and serving recomputes. Repeat runs are already fast.
+---
+
+## 7. Still open
+
+- **The ranking's detector stopped being produced.** stock-analyzer now writes
+  `topk-nonoverlap/highlow/min0.5/hold5/v1`. The default here
+  (`.../min0.5/v1`, `STOCK_PREDICTOR_DETECTOR`) ends at 2026-11-05, and so do
+  `completed_sessions`, `evaluate` and `backtest`. Switching changes what a
+  window is (DESIGN 11).
+- **The scheduler can hit a partial minute.** It recomputes at fixed points
+  (09:30, 09:45, ...). If stock-analyzer has not yet written that minute for
+  most symbols, the recompute builds the cross-section from the ones it has.
+  It should wait for the minute, as the live board and `predict` do.
+- **The fixed-target models are untuned and only calibrated after the fact.**
+  Neither beats ranking by current volatility (DESIGN 6.1).
+- **Disk for saved frames and models.** About 1.8 GB a year per feature set,
+  plus a model per retrain. Delete `data/frames/<feature set>/` for feature
+  sets no longer in use, and old `artifacts/` versions when they are no
+  longer needed.
+- **First builds are slow** (section 5). Vectorising the volume profiles and
+  cross-sectional ranks would shorten them and every live refresh.
 - **At every minute, scikit-learn sets the memory peak.** It holds out 10% of
   rows for early stopping by copying the whole matrix again. Only
-  `--minute-step`, or a smaller window of sessions, reduces that.
+  `--minute-step`, or fewer sessions, reduces that.

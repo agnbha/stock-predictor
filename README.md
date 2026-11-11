@@ -81,9 +81,15 @@ stock-predictor --params my-params.toml train       # train with chosen inputs a
 
 # A fixed target: P(the price touches +1% within the next 40 minutes)
 stock-predictor train --target 1 --horizon 40 --minute-step 3       # development sessions
-stock-predictor evaluate-target --holdout --model <that version>    # top 5 vs simple screens
+stock-predictor evaluate-target --holdout --model <that version> --record   # top 5 vs simple screens
+stock-predictor screener-evidence --model <that version> --record   # is the screener data worth anything?
 stock-predictor train --target 1 --horizon 40 --minute-step 3 --all-sessions   # to use live
 stock-predictor predict                                             # every symbol, right now
+
+# +0.5% at any point before today's close, with the best gain still available
+scripts/today.sh                                                    # the summary, whenever you want it
+stock-predictor train --target 0.5 --to-close --band max-gain --minute-step 3 --all-sessions
+stock-predictor predict --model latest --min-chance 50               # more likely than not
 
 # Phase 6 — serving
 stock-predictor serve --model latest --port 8001
@@ -158,6 +164,115 @@ about 20–23% of the time. `predict` therefore shows the calibrated figure too.
 The 20 development sessions before the held-out month gave the same ordering
 (18.0% vs 21.9%).
 
+### +0.5% before the close
+
+`train --target 0.5 --to-close --band max-gain` asks, of every minute: will
+the price trade 0.5% above this close at any point before 15:29? Its band is
+the best gain still available that day: the highest later price against the
+price now, as p25 / median / p75. Fixed targets train on every finished
+session, because their labels come from the candles, not from
+stock-analyzer's detector.
+
+In the held-out month (21 sessions, 2026-10-09..11-09), checked every 15
+minutes from 09:30 to 15:00:
+
+| | Reached +0.5% before the close |
+|---|---|
+| Any stock | 55% (74% at 09:30, 59% at 10:30, 27% at 15:00) |
+| The model's top 5 | 69% |
+| The 5 most volatile now | 69% |
+| Symbols the model gave 50% or more | 62.5% (about 22 a point) |
+
+A 0.5% gain at some point in the day is the norm for these stocks, not a
+signal, so the filter keeps most of the universe. The model ranks only
+slightly better than chance. Its band was too low for that busier month: the
+actual best gain beat the predicted median 60% of the time, not 50%. Buying
+the top 5, selling at +0.5% or at the close, made +0.03% a trade after
+0.083% costs, the same as buying every stock.
+
+`scripts/today.sh` prints this as a summary, on demand. It covers:
+- the stocks with a 50% or better chance;
+- each stock's median expected gain and range (the top 15 in full, the rest
+  grouped by median);
+- the stand-outs;
+- the held-out evidence on how far to trust it.
+
+It retrains the model first when a session has finished since it was trained
+(about 2 minutes); otherwise it takes about 7 seconds. Options:
+- `--target 1`: a different gain;
+- `--min-chance 60`: a stricter cut;
+- `--top 20`: list more stocks in full;
+- `--at 11:00`: an earlier minute;
+- `--session 2026-11-09`: a past day, marked in-sample when the model trained
+  on it;
+- `--json FILE`: also write the summary as JSON;
+- `--retrain` or `--no-retrain`: force or skip retraining;
+- `--evaluate`: redo the held-out check.
+
+It wraps `stock-predictor summary`, which takes the same options except the
+last three.
+
+### The dashboard
+
+`stock-predictor serve` also serves a live board at
+<http://127.0.0.1:8001/dashboard>, refreshed every 15 s. It uses the
+fixed-target model trained through the latest session (`--live-model` to
+choose another). For every symbol, at the latest minute 90% of symbols have
+finished, it shows:
+
+- **Likelihood.** The model's probability, and how often that probability
+  came true on sessions it had not trained on, with the number of cases
+  behind that rate. The model's top five are drawn in blue.
+- **What moved it.** The inputs that moved this symbol's probability most.
+  Each input, with its rank and z-score across stocks, is set to today's
+  median stock and the probability recomputed; the change is shown in points.
+- **Screener data from stock-analyzer.** Fundamentals from screener.in, the
+  latest CANSLIM letters, RS rating and signal, the bullish score and
+  watchlist. Where a signal has history, the board also shows what it has
+  been worth on this target.
+- **A conclusion.** A few sentences built only from the figures above.
+
+Beside the table:
+- how the numbers are made: the model, its training, the held-out comparison
+  and the calibration table;
+- the five most volatile stocks now, the screen the model is measured against;
+- the scheduler's ranking;
+- stock-analyzer's activity:
+  - the symbols its monitor polls and how fresh each one is;
+  - what it has bought and holds today;
+  - every request it has made to `POST /predict/intraday`, per symbol.
+
+That last list stays empty while stock-analyzer has `model.enabled=false`;
+it then scores with its own time-of-day prior, and the board says so.
+
+The board needs a fixed-target model. Its held-out and screener panels fill
+from the `--record` runs above, which are kept beside the model trained
+without the held-out month and found by target. After 14:49, a 40-minute
+window would run past the close, so the board holds 14:49.
+
+`#open=WELCORP` in the address opens that symbol's details, and
+`?theme=dark` picks the theme.
+
+Screener evidence, for touching +1% within 40 minutes. Each group is compared
+with the rest, using only what was published before each session's open:
+
+| Signal | Sessions | In group | Rest | Among the model's top 5 (in / rest) |
+|---|---|---|---|---|
+| Bullish score in the top fifth (previous session) | 89 | 5.2% | 3.0% | 16% / 19% |
+| On the watchlist made after the previous session | 89 | 7.1% | 3.6% | 18% / 18% |
+| CANSLIM RS rating 80+ (run before the open) | 8 | 7.1% | 4.0% | 21% / 9% |
+| 4+ of 7 CANSLIM letters passed | 8 | 9.1% | 4.0% | 26% / 9% |
+
+On its own, a bullish score or a watchlist place has meant roughly twice the
+chance. Among the model's top picks it has made no difference, which
+suggests the model already sees what those signals see. CANSLIM looks strong
+there too, but its runs began on 2026-10-26: eight sessions, and too few
+symbol-days to read either way.
+
+The fundamentals (P/E, ROE, growth) are one snapshot per company, so they
+cannot be tested on past sessions without look-ahead. The board shows them,
+labelled as not measured.
+
 ### Saved training frames
 
 Building one session's feature frame from stock-analyzer's views takes about
@@ -182,6 +297,7 @@ GET  /predictions/top?n=5    the ranking, with bands and as_of
 GET  /predictions/{symbol}   one symbol's expectation
 GET  /model                  version, trained window, held-out metrics
 POST /predict/intraday       stock-analyzer's existing per-candle model contract
+GET  /dashboard              the live board (above); /dashboard/data is its JSON
 ```
 
 Every ranking response carries `as_of` so a consumer can tell a fresh answer
@@ -197,8 +313,9 @@ src/stock_predictor/
 ├── config.py        paths, detector version, prediction points, duration buckets
 ├── params.py        candidate-input parameters: defaults, TOML/JSON file, --set
 ├── filters.py       hard filter rules over the candidate inputs
-├── data/            read-only access to stock-analyzer's v_* views; own SQLite store;
-│                    saved training frames (Parquet, one per session)
+├── data/            read-only access to stock-analyzer's v_* views (and, for display and
+│                    evidence only, its screener data and monitor activity); own SQLite
+│                    store; saved training frames (Parquet, one per session)
 ├── labels/          target construction and adverse moves — the leakage rule, in one place
 ├── features/        parity port of the 26-feature contract, + cross-sectional + regime
 │                    + candidate inputs (point-in-time)
@@ -209,16 +326,19 @@ src/stock_predictor/
 │                    calibration, registry, training set (saved frames, labels attached
 │                    on load, column-major matrix, minute step)
 ├── eval/            charges, purged walk-forward splitter, 4 baselines, metrics, backtest,
-│                    ablation of candidate inputs, fixed-target hit rates
-├── serving/         in-memory cache, recompute scheduler, FastAPI app
-└── cli.py           build-features | train | predict | evaluate | evaluate-target | backtest
-                     | ablate | params | frames | serve | score
+│                    ablation of candidate inputs, fixed-target hit rates, screener evidence
+├── serving/         in-memory cache, recompute scheduler, FastAPI app, live board and
+│                    dashboard page, log of stock-analyzer's requests
+└── cli.py           build-features | train | predict | summary | evaluate | evaluate-target
+                     | screener-evidence | backtest | ablate | params | frames | serve | score
+scripts/today.sh     the on-demand summary: retrains when stale, then `summary`
 
 tests/               leakage, targets, splits, metrics, charges, baselines,
                      feature parity (vs stock-analyzer's pinned fixture), aggregation, API,
                      candidate inputs (params, point-in-time values, filters, ablation),
                      storage (signals written once, saved frames, rows independent of build time),
-                     fixed targets (labels, clock-minute windows, live session, versions)
+                     fixed targets (labels, clock-minute windows, live session, versions),
+                     dashboard (drivers, screener point-in-time, request log, endpoints, board)
 ```
 
 ## Status by phase (design §9)
@@ -230,9 +350,11 @@ tests/               leakage, targets, splits, metrics, charges, baselines,
 | 3 · feature pipeline | **done** — parity port verified to 1e-9 against the Java fixture |
 | 4–5 · ranker + magnitude/duration | **done** — stage-1 GBDT, stage-2 reduction, calibration |
 | 5a · candidate screening inputs | **done** — 7 inputs as parameters, off by default; `ablate` measures them |
-| 6 · serving + scheduler + storage | **done** — FastAPI, T0/T1/15-min recompute, prediction store |
-| 7 · fundamentals score | **interface only** — no data source exists yet (design §3.3); `NullFundamentalScore` by default, `CsvFundamentalScore` for a bring-your-own screener export |
-| 8 · news sentiment | **interface only** — `NullNewsSentiment` (design §3.4, stretch) |
+| 5b · fixed targets | **done** — +X% within H minutes or before the close, calibrated chance, best-gain band, `evaluate-target`; ties the volatility screen |
+| 6 · serving + scheduler + storage | **done** — FastAPI, T0/T1/15-min recompute, prediction store, live reads of the session in progress |
+| 6a · live board + summary | **done** — `/dashboard`, `summary` / `scripts/today.sh`, screener evidence |
+| 7 · fundamentals score | **interface only** — stock-analyzer's screener data is a snapshot, not point-in-time (design §3.4); `NullFundamentalScore` by default, `CsvFundamentalScore` for a bring-your-own export |
+| 8 · news sentiment | **interface only** — `NullNewsSentiment` (design §3.5, stretch) |
 
 ### Deviations from the design, and why
 
@@ -259,5 +381,5 @@ tests/               leakage, targets, splits, metrics, charges, baselines,
 ## Tests
 
 ```bash
-pytest -q          # 74 tests; those needing stock-analyzer's DB skip cleanly without it
+pytest -q          # 87 tests; those needing stock-analyzer's DB skip cleanly without it
 ```
