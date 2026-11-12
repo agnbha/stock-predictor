@@ -198,7 +198,9 @@ the top 5, selling at +0.5% or at the close, made +0.03% a trade after
 `scripts/today.sh` prints this as a summary, on demand. It covers:
 - the stocks with a 50% or better chance;
 - each stock's median expected gain and range (the top 15 in full, the rest
-  grouped by median);
+  grouped by median), with the range also as prices ("Range in price": the
+  price now raised by the p25 and p75 gains; for `tomorrow.sh`, worked from
+  the latest price, as the open is not known yet);
 - the stand-outs;
 - the held-out evidence on how far to trust it.
 
@@ -466,5 +468,5 @@ tests/               leakage, targets, splits, metrics, charges, baselines,
 ## Tests
 
 ```bash
-pytest -q          # 98 tests; those needing stock-analyzer's DB skip cleanly without it
+pytest -q          # 99 tests; those needing stock-analyzer's DB skip cleanly without it
 ```
