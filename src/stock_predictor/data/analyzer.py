@@ -69,6 +69,35 @@ class Opportunity:
     source: str  # 'final' or 'live'
 
 
+def _connect_read_only(db_path: Path) -> sqlite3.Connection:
+    """A connection that cannot change stock-analyzer's database.
+
+    mode=ro first: the coupling is one-way and read-only (design section 3.1).
+    stock-analyzer's database is in WAL mode, and a WAL reader needs the
+    ``-shm`` file beside it. While a stock-analyzer process has the database
+    open that file exists; once the last one closes, SQLite deletes it, and a
+    mode=ro connection may not create it, so every read fails with "unable to
+    open database file" (before the market opens, say, until the daemon
+    starts). Then the connection is opened read-write so SQLite can create
+    the file, with ``query_only`` on so that any write is refused.
+
+    Not immutable=1: stock-analyzer's daemon writes live candles all session,
+    and an "immutable" reader then sees stale pages and, once a checkpoint
+    rewrites them mid-read, "database disk image is malformed".
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+    try:
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()  # the open is lazy
+        return conn
+    except sqlite3.OperationalError as e:
+        conn.close()
+        if "unable to open" not in str(e):
+            raise
+    conn = sqlite3.connect(f"file:{db_path}?mode=rw", uri=True, check_same_thread=False)
+    conn.execute("PRAGMA query_only = ON")
+    return conn
+
+
 # How long today's candles are reused before asking the database again. One
 # feature build reads them once per symbol; stock-analyzer adds a minute at a time.
 LIVE_REFRESH_SECONDS = 15.0
@@ -82,13 +111,7 @@ class AnalyzerViews:
                 f"stock-analyzer database not found at {self.db_path}. "
                 "Set STOCK_ANALYZER_DB or check out stock-analyzer beside this project."
             )
-        # mode=ro: the coupling is one-way and read-only (design section 3.1).
-        # Not immutable=1: stock-analyzer's daemon writes live candles all
-        # session, and an "immutable" reader then sees stale pages and, once a
-        # checkpoint rewrites them mid-read, "database disk image is malformed".
-        self._conn = sqlite3.connect(
-            f"file:{self.db_path}?mode=ro", uri=True, check_same_thread=False
-        )
+        self._conn = _connect_read_only(self.db_path)
         self._conn.row_factory = sqlite3.Row
         self.live = live
         self.live_session: Optional[str] = None  # pins "today" (tests); else the date in IST

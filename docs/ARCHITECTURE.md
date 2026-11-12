@@ -365,7 +365,12 @@ minutes for 111 sessions on 5 processes); live builds take it every refresh.
 - **Read-only, never immutable.** stock-analyzer's daemon writes all session
   long. A connection opened as `immutable` reads stale pages and, once a
   checkpoint rewrites them mid-read, fails with "database disk image is
-  malformed". The connection is plain `mode=ro`.
+  malformed". The connection is plain `mode=ro`. The database is in WAL
+  mode, so a reader needs the `-shm` file beside it. When no stock-analyzer
+  process has it open (before the daemon starts, or after the evening batch),
+  SQLite has deleted that file and a `mode=ro` connection may not recreate
+  it. In that case the connection is opened read-write with `PRAGMA
+  query_only`, so any write is still refused.
 - **One SQLite connection per thread.** The scheduler and the live board each
   have their own. A connection shared by two threads at once slows both to a
   crawl.

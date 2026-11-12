@@ -209,7 +209,9 @@ feature comes from sessions before today.
 
 Coupling is one-way and read-only. stock-predictor never writes to that
 database; it keeps its own. The connection is opened read-only but not as
-immutable, because the daemon writes all session long.
+immutable, because the daemon writes all session long. When nothing else
+has the database open, the connection is opened with writes switched off
+(`query_only`) instead (see ARCHITECTURE 6).
 
 ### 3.2 Ground truth and completed sessions
 

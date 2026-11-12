@@ -66,7 +66,11 @@ def test_summary_filters_lists_groups_and_explains():
     assert "trained through 2026-11-05; 2026-11-09 has finished" in notes
     assert "7 minutes behind" in notes
 
+    assert s["top"][1]["range_price"] == pytest.approx([200.60, 203.00])  # B: 200 raised by +0.30% and +1.5%
+
     text = format_summary(s)
+    assert any(ln.split()[:2] == ["#", "Stock"] and "Range in price" in ln for ln in text.splitlines())
+    assert "+0.55 to +2.00%    100.55 to 102.00" in text and "200.60 to 203.00" in text
     assert "5 of 6 stocks have a 50% or better chance" in text
     assert "+0.70 to +0.79%  C, D" in text
     assert "The model's top 5: 69%; the 5 most volatile stocks: 69% (-0.02% a trade)." in text

@@ -117,6 +117,8 @@ def build_summary(rows, cfg: TripleBarrierConfig, version: str, card, session: s
                 "track": record.get(r["symbol"]),
                 "p_model": float(r["p_model"]), "median_gain_pct": float(r["p50"]),
                 "range_pct": [float(r["p25"]), float(r["p75"])],
+                # the same range as prices: the price shown, raised by the p25 and p75 gains
+                "range_price": [float(r["price"] * (1 + r["p25"] / 100)), float(r["price"] * (1 + r["p75"] / 100))],
                 "target_price": float(r["price"] * (1 + target / 100)), "vol_rank": int(r["vol_rank"])}
 
     groups = []
@@ -220,6 +222,7 @@ def format_summary(s: dict[str, Any], width: int = 100) -> str:
         f"{t:g}% above the price now before 15:29.",
         "Expected gain: the best price later today against now (median, and the p25-p75 range), "
         "before costs. Where it closes can be lower.",
+        "Range in price: the same p25-p75 range as prices, the best price expected later today.",
         "",
     ]
     lines += _table(s, "Price")
@@ -237,14 +240,17 @@ def _table(s: dict[str, Any], price_label: str) -> list[str]:
     if not s["top"]:
         return ["  (none)"]
     tr = s.get("track_record")
-    head = f"  {'#':>2}  {'Stock':<12} {price_label:>10}  {'Chance':>6}  {'Median':>7}   {'Range':<17}"
+    money = [f"{a:.2f} to {b:.2f}" for a, b in (r["range_price"] for r in s["top"])]
+    mw = max(len("Range in price"), *map(len, money))
+    head = (f"  {'#':>2}  {'Stock':<12} {price_label:>10}  {'Chance':>6}  {'Median':>7}   {'Range':<17}"
+            f"  {'Range in price':<{mw}}")
     if tr:
         head += "  Last month"
     out = [head]
     for i, r in enumerate(s["top"], start=1):
         lo, hi = r["range_pct"]
         line = (f"  {i:>2}  {r['symbol']:<12} {r['price']:>10.2f}  {_pct(r['chance']):>6}  "
-                f"{r['median_gain_pct']:>+6.2f}%   {f'{lo:+.2f} to {hi:+.2f}%':<17}")
+                f"{r['median_gain_pct']:>+6.2f}%   {f'{lo:+.2f} to {hi:+.2f}%':<17}  {money[i - 1]:<{mw}}")
         if tr:
             line += "  " + _track(r.get("track"))
         out.append(line)
@@ -272,6 +278,8 @@ def _format_next(s: dict[str, Any], width: int) -> str:
         f"{t:g}% above {nd}'s open at some point before its close.",
         "Expected gain: the best price that session against its open (median, and the p25-p75 range), "
         "before costs. An overnight gap is not counted; the price column is the latest one.",
+        "Range in price: the same p25-p75 range as prices, worked from the latest price "
+        "(the open is not known yet, so it moves with wherever the stock opens).",
         "",
     ]
     lines += _table(s, "Price now")

@@ -158,6 +158,32 @@ def test_live_views_read_the_session_in_progress(live_db):
     assert plain.universe("2026-11-06") == []
 
 
+def test_a_wal_database_no_process_has_open_is_still_read_and_never_written(live_db):
+    # stock-analyzer's database is in WAL mode. Once its last process closes
+    # it, SQLite removes the -wal and -shm files, and a mode=ro connection
+    # cannot recreate them: "unable to open database file" before the market
+    # opens, and in the evening refresh after the batch has finished.
+    c = sqlite3.connect(live_db)
+    assert c.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+    c.close()
+    assert not live_db.with_name("sa.db-shm").exists() and not live_db.with_name("sa.db-wal").exists()
+
+    insert = "INSERT INTO v_intraday_candles VALUES ('Z', 1, '2026-11-07', 1, 1, 1, 1, 1)"
+    v = AnalyzerViews(live_db)
+    assert v.sessions() == ["2026-11-05"]
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        v._conn.execute(insert)
+    # with a writer holding it open (the files exist), as during the session
+    writer = sqlite3.connect(live_db)
+    writer.execute("SELECT 1 FROM sqlite_master").fetchall()
+    w = AnalyzerViews(live_db)
+    assert w.sessions() == ["2026-11-05"]
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        w._conn.execute(insert)
+    for x in (v, w, writer):
+        x.close()
+
+
 # -- against the analyzer DB ----------------------------------------------------
 
 
