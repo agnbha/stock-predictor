@@ -15,3 +15,4 @@ artifacts/
 *.duckdb
 *.parquet
 data/logs/
+.DS_Store
