@@ -14,6 +14,17 @@ replaces the H minutes with the rest of the session: does the price touch
 Every mode also reports ``max_gain_pct``: the best high in the window against
 the entry, the most a buyer at that close could have sold for.
 
+With a window to the close, ``outcome`` says what counts as reaching the target:
+
+* ``touch`` (the default): the high reaches +``target_pct``;
+* ``close``: the session closes +``target_pct`` or more above the entry;
+* ``opportunities``: at least ``count`` separate +``target_pct`` opportunities
+  start after the entry. An opportunity is the one stock-analyzer's detector
+  marks (``topk-nonoverlap/highlow/.../hold5``): buy at a candle's low, sell at
+  the high of a candle at least 5 minutes later; the next one buys after that
+  sale. The count is the most such round trips the rest of the session allowed
+  (``opportunity_counts``), with perfect hindsight on the timing.
+
 Entry is the close of the row's own candle; the window is the candles after
 it whose start is within H clock minutes (a minute with no trades is a gap,
 not a shorter window). When one candle reaches both barriers, the order inside
@@ -32,6 +43,10 @@ from typing import Optional, Sequence
 
 import numpy as np
 
+OUTCOMES = ("touch", "close", "opportunities")
+# As stock-analyzer's opportunity detector: a sale at least this long after the buy.
+OPPORTUNITY_HOLD_MINUTES = 5
+
 
 @dataclass(frozen=True)
 class TripleBarrierConfig:
@@ -46,10 +61,20 @@ class TripleBarrierConfig:
     # The window is the rest of the session (horizon_minutes is then unused).
     # Needs a fixed target and no stop.
     to_close: bool = False
+    # What reaching the target means in a window to the close (module docstring),
+    # and for "opportunities", how many.
+    outcome: str = "touch"
+    count: int = 1
 
     def __post_init__(self) -> None:
         if self.to_close and (self.target_pct is None or self.stop_pct is not None):
             raise ValueError("to_close needs a fixed target (target_pct) and no stop")
+        if self.outcome not in OUTCOMES:
+            raise ValueError(f"outcome must be one of {', '.join(OUTCOMES)}")
+        if self.outcome != "touch" and not self.to_close:
+            raise ValueError(f"outcome {self.outcome!r} needs a window to the close (to_close)")
+        if self.count < 1 or (self.count != 1 and self.outcome != "opportunities"):
+            raise ValueError("count is how many opportunities: 1 or more, and only with that outcome")
 
     @property
     def fixed(self) -> bool:
@@ -57,6 +82,10 @@ class TripleBarrierConfig:
 
     def describe(self) -> str:
         if self.to_close:
+            if self.outcome == "close":
+                return f"a close +{self.target_pct:g}% or more above the entry"
+            if self.outcome == "opportunities":
+                return f"{self.count}+ separate +{self.target_pct:g}% opportunities before the close"
             return f"+{self.target_pct:g}% before the close"
         h = f"{self.horizon_minutes} min"
         if not self.fixed:
@@ -100,7 +129,7 @@ def barrier_arrays(
     idx = np.arange(n)
     t = np.asarray(ts, dtype=np.int64) if ts is not None else idx * 60
     if c.to_close:
-        return _to_close(cl, hi, t, c.target_pct)
+        return _to_close(cl, hi, lo, t, c)
     limit = t + c.horizon_minutes * 60
     if c.fixed:
         up = cl * (1 + c.target_pct / 100.0)
@@ -167,9 +196,38 @@ def first_reach(high: np.ndarray, level: np.ndarray) -> np.ndarray:
     return out
 
 
-def _to_close(cl: np.ndarray, hi: np.ndarray, t: np.ndarray, target_pct: float) -> dict:
+def opportunity_counts(high, low, ts, pct: float,
+                       hold_minutes: int = OPPORTUNITY_HOLD_MINUTES) -> np.ndarray:
+    """``out[s]`` for s in 0..n: the most separate opportunities among candles
+    s onwards (``out[n]`` is 0). An opportunity buys at a candle's low and sells
+    at the high of a candle at least ``hold_minutes`` later, ``pct``% or more
+    above; the next buys at a candle after that sale.
+
+    Taking, each time, the opportunity whose sale comes first leaves the most
+    room for the rest, so it gives the most (interval scheduling)."""
+    hi = np.asarray(high, dtype=np.float64)
+    lo = np.asarray(low, dtype=np.float64)
+    t = np.asarray(ts, dtype=np.int64)
+    n = len(hi)
+    out = np.zeros(n + 1, dtype=np.int64)
+    if n < 2:
+        return out
+    level = np.where(lo > 0, lo * (1 + pct / 100.0), np.inf)
+    earliest = np.searchsorted(t, t + hold_minutes * 60, side="left")  # first candle a sale may be
+    j = np.arange(n)
+    ok = (hi[None, :] >= level[:, None]) & (j[None, :] >= earliest[:, None])
+    sale = np.where(ok.any(axis=1), ok.argmax(axis=1), n)  # the first sale for a buy at each candle
+    first = np.minimum.accumulate(sale[::-1])[::-1]        # ... for a buy at that candle or later
+    for s in range(n - 1, -1, -1):
+        out[s] = 0 if first[s] >= n else 1 + out[first[s] + 1]
+    return out
+
+
+def _to_close(cl: np.ndarray, hi: np.ndarray, lo: np.ndarray, t: np.ndarray,
+              cfg: TripleBarrierConfig) -> dict:
     """The window is every later candle in the session; it always ends at the
     close, so every row is complete."""
+    target_pct = cfg.target_pct
     n = len(cl)
     up = cl * (1 + target_pct / 100.0)
     first = first_reach(hi, up)
@@ -184,10 +242,19 @@ def _to_close(cl: np.ndarray, hi: np.ndarray, t: np.ndarray, target_pct: float) 
         gain = np.maximum(after - cl, 0.0) / cl * 100.0
     last = t[-1] if n else 0
     minutes = np.where(hit, (t[np.minimum(first, n - 1)] - t) // 60, (last - t) // 60)
+    out = {}
+    if cfg.outcome == "close":
+        label = (fwd >= target_pct - 1e-9).astype(np.int8)
+        minutes = (last - t) // 60
+    elif cfg.outcome == "opportunities":
+        count = opportunity_counts(hi, lo, t, target_pct)[1:]  # buys after each row's own candle
+        label = (count >= cfg.count).astype(np.int8)
+        minutes = (last - t) // 60
+        out["opportunities"] = count
     dead = cl <= 0
     label[dead], fwd[dead], gain[dead] = 0, 0.0, 0.0
     return {"label": label, "forward_return_pct": fwd, "max_gain_pct": gain,
-            "minutes_to_barrier": minutes, "complete": np.ones(n, dtype=bool)}
+            "minutes_to_barrier": minutes, "complete": np.ones(n, dtype=bool), **out}
 
 
 def triple_barrier_labels(
