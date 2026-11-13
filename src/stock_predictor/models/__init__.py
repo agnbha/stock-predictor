@@ -4,6 +4,7 @@ from stock_predictor.models.forward import ForwardModel
 from stock_predictor.models.aggregate import aggregate_to_topn
 from stock_predictor.models.calibrate import GainCalibrator
 from stock_predictor.models.registry import ModelRegistry, ModelCard, card_target, model_version_string
+from stock_predictor.models import nextday  # noqa: E402  (after the registry: it imports training)
 from stock_predictor.models.training import (
     FrameSource, TrainingSet, model_feature_columns, training_frame, training_set,
 )

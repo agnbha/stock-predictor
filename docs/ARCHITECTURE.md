@@ -167,6 +167,11 @@ finished sessions ──► FrameSource ──► saved feature frame (build onc
 - **Labels never touch the frames.** They are attached on load (well under a
   second per session), so a new target, horizon or band reuses every frame.
   Label code lives outside the fingerprinted files for that reason.
+- **A model's name says how it was trained.** The target comes first, then
+  `-recent<N>d` for a window of only the last N days and `-m<K>` for every
+  K-th minute. The card also records the first and last session and the row
+  count, and `stock-predictor models` lists them. Results kept beside a model
+  are found by its recipe: target, band, window and minute step.
 - **Evaluation reuses the same frames.** `evaluate --model`, `ablate --model`,
   `evaluate-target` and `screener-evidence` cut each one back to their
   prediction point. That is exact because every row depends only on candles
@@ -199,7 +204,23 @@ scheduler (T0, T1, every 15 min) ──► recompute ──► cache ──► /
 With no ranking model served, the recompute falls back to the
 `highest_volatility` baseline and labels the answer with that version.
 
-### 2.4 stock-analyzer's signal requests
+### 2.4 The daily refresh
+
+```
+stock-analyzer evening batch (18:30) ──► candles for the day stored
+                                              │
+scripts/refresh.sh (launchd, 19:15) ──► wait until stored ──► scorecard (score the day's recorded picks)
+                                              │
+                    retrain each model in use on every finished session (frames built for the new one)
+                                              │
+                    Fridays: held-out checks again · prune superseded models (keep 3 of each kind)
+```
+
+Every step is idempotent; a missed run starts when the machine wakes. The
+recorded picks (`summary_pick`) come from `today.sh` and `tomorrow.sh`, one
+row per stock per run.
+
+### 2.5 stock-analyzer's signal requests
 
 ```
 stock-analyzer monitor ──► POST /predict/intraday (every tracked symbol, every poll)
@@ -220,6 +241,8 @@ stock-analyzer monitor ──► POST /predict/intraday (every tracked symbol, e
 | **Prediction cache** | Memory of `serve` | The scheduler | The latest ranking | Under 1 KB |
 | **Live board** | Memory of `serve` | The board's thread | The latest snapshot of every symbol | ~200 KB of JSON |
 | **Request log** | Memory of `serve` | `POST /predict/intraday` | Per-symbol request counts and last answers | Small |
+| **Recorded picks** | `data/stock-predictor.db`, table `summary_pick` | `today.sh`, `tomorrow.sh` (`summary --record`); scored by `scorecard` | Every stock's prediction per run, and later its outcome | 62 rows a run, ~10 KB |
+| **Refresh log** | `data/logs/refresh.log` | `scripts/refresh.sh` | What each daily refresh did | A few KB a day |
 | **Training matrix** | Memory of `train` | `train` | One float64 matrix of features, plus labels | Section 5 |
 | **Parameters** | `params.example.toml` or your own file (`STOCK_PREDICTOR_PARAMS`) | You | Candidate-input switches (DESIGN 4.1) | — |
 
@@ -310,9 +333,21 @@ sessions (2026-09-07 to 2026-10-06), at T1:
 
 Every 5th minute scores 0.06 percentage points lower, which twenty sessions
 cannot distinguish from noise. The ranking's default stays at every minute.
-The fixed-target models train on every 3rd minute: on all 111 sessions that is
-~724,000 rows and a ~2.3 GB peak. A fit of classifier, band and calibration
-takes ~2–5 minutes.
+The models the scripts use train on every finished session. `today.sh`'s
+model uses every minute: on 110 sessions that is 2,158,922 rows, a 4.2 GB peak
+and about 3 minutes for classifier, band and calibration. `tomorrow.sh`'s
+model has one row per stock-session (~6,200) and fits in seconds. The daily
+refresh retrains both. For +0.5% before the close on 90 development sessions,
+the variants compared:
+
+| | Rows | Peak memory | Time |
+|---|---|---|---|
+| Full history, every 3rd minute | 573k | 2.5 GB | 74 s |
+| Full history, every minute | 1.71M | 4.3 GB | 154 s |
+| Last 30 days, every minute | 427k | 1.9 GB | 38 s |
+| Last 30 days, every 3rd minute | 143k | 0.9 GB | 20 s |
+
+All four score within noise of each other on the held-out month (DESIGN 6.1).
 
 At every minute, peak memory is about 2.9 times the matrix, because of
 scikit-learn's own copies. Training the ranking on all sessions at every minute
@@ -330,7 +365,12 @@ minutes for 111 sessions on 5 processes); live builds take it every refresh.
 - **Read-only, never immutable.** stock-analyzer's daemon writes all session
   long. A connection opened as `immutable` reads stale pages and, once a
   checkpoint rewrites them mid-read, fails with "database disk image is
-  malformed". The connection is plain `mode=ro`.
+  malformed". The connection is plain `mode=ro`. The database is in WAL
+  mode, so a reader needs the `-shm` file beside it. When no stock-analyzer
+  process has it open (before the daemon starts, or after the evening batch),
+  SQLite has deleted that file and a `mode=ro` connection may not recreate
+  it. In that case the connection is opened read-write with `PRAGMA
+  query_only`, so any write is still refused.
 - **One SQLite connection per thread.** The scheduler and the live board each
   have their own. A connection shared by two threads at once slows both to a
   crawl.

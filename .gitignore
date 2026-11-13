@@ -14,3 +14,4 @@ data/frames/
 artifacts/
 *.duckdb
 *.parquet
+data/logs/

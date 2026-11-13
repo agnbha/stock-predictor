@@ -81,10 +81,14 @@ class ForwardModel:
         q = self._qr.predict(X)
         p = np.asarray(self._clf.predict_proba(X))
         cal = getattr(self, "calibrator", None)
+        # Each quantile has its own regressor, so on some rows they cross (a
+        # median above the p75). Sorting each row restores the order; it is
+        # the standard rearrangement and never makes a quantile less accurate.
+        band = np.sort(np.vstack([np.asarray(q[0.25]), np.asarray(q[0.5]), np.asarray(q[0.75])]), axis=0)
         return ForwardPrediction(
             p_up=p,
-            gain_p25=np.asarray(q[0.25]),
-            gain_p50=np.asarray(q[0.5]),
-            gain_p75=np.asarray(q[0.75]),
+            gain_p25=band[0],
+            gain_p50=band[1],
+            gain_p75=band[2],
             p_seen=None if cal is None else np.array([cal.transform(x) for x in p]),
         )

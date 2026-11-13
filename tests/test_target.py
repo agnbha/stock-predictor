@@ -158,6 +158,32 @@ def test_live_views_read_the_session_in_progress(live_db):
     assert plain.universe("2026-11-06") == []
 
 
+def test_a_wal_database_no_process_has_open_is_still_read_and_never_written(live_db):
+    # stock-analyzer's database is in WAL mode. Once its last process closes
+    # it, SQLite removes the -wal and -shm files, and a mode=ro connection
+    # cannot recreate them: "unable to open database file" before the market
+    # opens, and in the evening refresh after the batch has finished.
+    c = sqlite3.connect(live_db)
+    assert c.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+    c.close()
+    assert not live_db.with_name("sa.db-shm").exists() and not live_db.with_name("sa.db-wal").exists()
+
+    insert = "INSERT INTO v_intraday_candles VALUES ('Z', 1, '2026-11-07', 1, 1, 1, 1, 1)"
+    v = AnalyzerViews(live_db)
+    assert v.sessions() == ["2026-11-05"]
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        v._conn.execute(insert)
+    # with a writer holding it open (the files exist), as during the session
+    writer = sqlite3.connect(live_db)
+    writer.execute("SELECT 1 FROM sqlite_master").fetchall()
+    w = AnalyzerViews(live_db)
+    assert w.sessions() == ["2026-11-05"]
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        w._conn.execute(insert)
+    for x in (v, w, writer):
+        x.close()
+
+
 # -- against the analyzer DB ----------------------------------------------------
 
 
@@ -243,3 +269,15 @@ def test_to_close_versions_points_and_the_max_gain_band():
     assert (p.gain_p50 > 0.5).mean() > 0.95
     with pytest.raises(ValueError):
         ForwardModel(["a", "b"], band="max_gain_pct").fit_matrix(X, gain > 1, ret)
+
+
+def test_the_band_is_never_out_of_order():
+    from stock_predictor.models import ForwardModel, GBDTClassifier, GBDTQuantileRegressor
+
+    rng = np.random.default_rng(5)
+    X = rng.normal(size=(600, 2))
+    y = np.abs(X[:, 0]) + rng.normal(0, 2, 600)  # noisy, so separately fitted quantiles cross
+    m = ForwardModel(["a", "b"], GBDTClassifier(n_estimators=10), GBDTQuantileRegressor(n_estimators=60, max_depth=6))
+    m.fit_matrix(X, (y > 1).astype(int), y)
+    p = m.predict(pd.DataFrame(rng.normal(size=(500, 2)) * 3, columns=["a", "b"]))
+    assert (p.gain_p25 <= p.gain_p50).all() and (p.gain_p50 <= p.gain_p75).all()

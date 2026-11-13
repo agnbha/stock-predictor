@@ -66,10 +66,14 @@ def test_summary_filters_lists_groups_and_explains():
     assert "trained through 2026-11-05; 2026-11-09 has finished" in notes
     assert "7 minutes behind" in notes
 
+    assert s["top"][1]["range_price"] == pytest.approx([200.60, 203.00])  # B: 200 raised by +0.30% and +1.5%
+
     text = format_summary(s)
+    assert any(ln.split()[:2] == ["#", "Stock"] and "Range in price" in ln for ln in text.splitlines())
+    assert "+0.55 to +2.00%    100.55 to 102.00" in text and "200.60 to 203.00" in text
     assert "5 of 6 stocks have a 50% or better chance" in text
     assert "+0.70 to +0.79%  C, D" in text
-    assert "The model's top 5: 69%; the 5 most volatile stocks: 69%." in text
+    assert "The model's top 5: 69%; the 5 most volatile stocks: 69% (-0.02% a trade)." in text
     assert "Any stock reached +0.5% 55% of the time (59% from 10:30)." in text
 
 
@@ -114,3 +118,51 @@ def test_today_script_parses_and_checks_its_arguments():
     assert help_.returncode == 0 and "--retrain" in help_.stdout and "--evaluate" in help_.stdout
     bad = subprocess.run(["bash", str(script), "--target", "abc"], capture_output=True, text=True)
     assert bad.returncode == 2 and "must be a number" in bad.stderr
+
+
+# -- models trained on only the last few weeks ---------------------------------
+
+
+def test_recent_window_and_minute_step_are_named_and_kept_apart(tmp_path):
+    from stock_predictor.models.registry import model_version_string
+
+    assert model_version_string("sklearn", "d", CFG) == "sklearn-target-0.5pct-close/d"
+    assert model_version_string("sklearn", "d", CFG, 3) == "sklearn-target-0.5pct-close-m3/d"
+    assert model_version_string("sklearn", "d", CFG, 1, 30) == "sklearn-target-0.5pct-close-recent30d/d"
+    assert model_version_string("sklearn", "d", None, 5, 30) == "sklearn-triple-barrier-recent30d-m5/d"
+
+    reg = ModelRegistry(tmp_path)
+    t05 = asdict(CFG)
+    full = ModelCard("full", "sklearn", "2026-11-09", 110, ["x"], target=t05, band="max_gain_pct", minute_step=3)
+    full_twin = ModelCard("full-twin", "sklearn", "2026-10-08", 90, ["x"], target=t05, band="max_gain_pct",
+                          minute_step=3)
+    recent = ModelCard("recent", "sklearn", "2026-11-09", 20, ["x"], target=t05, band="max_gain_pct",
+                       minute_step=1, recent_days=30, trained_from="2026-10-12")
+    recent_twin = ModelCard("recent-twin", "sklearn", "2026-10-08", 22, ["x"], target=t05, band="max_gain_pct",
+                            minute_step=1, recent_days=30)
+    for c in (full_twin, recent_twin, full, recent):
+        reg.save(c.model_version, None, c)
+    reg.save_extra("full-twin", "evaluation", {"who": "full"})
+    reg.save_extra("recent-twin", "evaluation", {"who": "recent"})
+
+    assert find_model(reg, 0.5) == "full" and find_model(reg, 0.5, recent=True) == "recent"
+    assert reg.latest_with_target() == "full"  # the dashboard's default stays full history
+    # each model finds the held-out check of its own kind
+    assert reg.extra_like(full, "evaluation") == ("full-twin", {"who": "full"})
+    assert reg.extra_like(recent, "evaluation") == ("recent-twin", {"who": "recent"})
+    views = SimpleNamespace(sessions=lambda: ["2026-11-09"])
+    assert model_state(0.5, reg, views, recent=True) == "ok"
+
+
+def test_recent_days_keeps_the_last_calendar_days_of_what_was_chosen():
+    from stock_predictor.cli import _sessions
+
+    days = ["2026-09-01", "2026-09-30", "2026-10-01", "2026-10-15", "2026-10-31"] + [
+        f"2026-11-{d:02d}" for d in range(1, 22)]
+    views = SimpleNamespace(sessions=lambda start=None, end=None: list(days))
+    all_ = SimpleNamespace(all_sessions=True, recent_days=30)
+    assert _sessions(views, all_, candles_only=True)[0] == "2026-10-31"  # 2026-11-21 minus 30 days
+    # development sessions are all but the last 21 (09-01 .. 10-31); their last 30 days:
+    dev = SimpleNamespace(recent_days=30)
+    assert _sessions(views, dev, candles_only=True) == ["2026-10-15", "2026-10-31"]
+    assert _sessions(views, SimpleNamespace(all_sessions=True), candles_only=True) == days

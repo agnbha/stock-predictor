@@ -111,6 +111,24 @@ for example, "which stocks are expected to gain 0.5% or more before today's
 close, and by how much". Its ground truth is the candles themselves, so it
 needs no detector, and every finished session can be used.
 
+### 1.3 The next session
+
+The same question about a session that has not opened: will the stock trade
+X% above **that session's open** before its close? The open is a price anyone
+can buy at, through the pre-open auction; an overnight gap is not counted as a
+gain. The model has one row per (symbol, session): the stock's full state at
+15:00 the session before (the same 84 features), against the next session's
+high, open and close. `scripts/tomorrow.sh` shows it.
+
+### 1.4 Every answer is recorded and scored
+
+Each run of `today.sh` and `tomorrow.sh` stores every stock's prediction:
+chance, band, reference price, and the minute it used. After the session
+closes, the prediction is scored against what happened, giving a scorecard
+per session and a track record per stock. Before that, the held-out month
+supplies one: how often, for each stock, a model that had not seen the month
+said "50%+", and how often that came true.
+
 ---
 
 ## 2. Timing, and the leakage rule
@@ -191,7 +209,9 @@ feature comes from sessions before today.
 
 Coupling is one-way and read-only. stock-predictor never writes to that
 database; it keeps its own. The connection is opened read-only but not as
-immutable, because the daemon writes all session long.
+immutable, because the daemon writes all session long. When nothing else
+has the database open, the connection is opened with writes switched off
+(`query_only`) instead (see ARCHITECTURE 6).
 
 ### 3.2 Ground truth and completed sessions
 
@@ -410,6 +430,16 @@ mapped, isotonically, to how often they came true. The model is then refitted
 on everything and keeps that map. Every answer shows both numbers, and the
 model card keeps the table.
 
+The models in use train on every finished session stock-analyzer has, and
+the same-day model on every minute of each: all the data points there are. It
+is retrained after each new session (section 7). Only the held-out twin leaves
+the latest 21 sessions out, so that it can be tested on them. Training on only
+the last N days (`--recent-days N`) and on every K-th minute (`--minute-step
+K`) were tested; neither changed held-out results measurably (section 6.1),
+and the scripts use neither. The model's name and card record the window and
+step, and the three quantiles are sorted per row, since separately fitted
+ones can cross.
+
 This stage sees millions of examples. It is where any real signal will be
 found, and it is trained without ever knowing what a "top five" is. LightGBM is
 preferred. scikit-learn's histogram GBDT, the same family, is used when
@@ -509,9 +539,14 @@ as the evidence for how far to trust it.
 | Best window, stage-1 model at T1 | 20 sessions after 46 training | 1.41% net | `highest_volatility` 2.43% | — | — |
 | +1% within 40 minutes, top 5 | held-out month, 21 sessions | 18.3% | most volatile now 21.4% | 5.5% | −0.06% (screen −0.05%) |
 | +0.5% before the close, top 5 | held-out month, 21 sessions | 69% | most volatile now 69% | 55% | +0.03% (every stock +0.03%) |
+| +0.5% above the next open, top 5 | held-out month, 21 sessions | 69% | widest range the day before 83% | 73% | −0.49% (screen −0.14%, every stock −0.06%) |
 
 What follows from it:
 
+- **More recent or finer training data has not helped.** For +0.5% before the
+  close, models trained on only the last 30 days, or on every minute rather
+  than every 3rd, all reached 66–69% for the top 5 on the held-out month, and
+  all kept the same too-low band.
 - **No model beats the simplest volatility screen yet**, on any of the three
   questions, and none makes money after costs.
 - **The fixed-target models rank well above chance**, about three times the
@@ -571,9 +606,15 @@ user; nothing here needs Redis until several consumers exist.
     requesting.
 - **On demand**: `predict` prints every symbol now, and `summary` (or
   `scripts/today.sh`) prints the stocks expected to reach the target before
-  the close, with their median gain and range, the stand-outs and the
-  held-out evidence. `today.sh` retrains the model first when a session has
-  finished since it was trained.
+  the close. Each comes with its median gain and range and its held-out
+  track record; the summary also gives the stand-outs and the held-out
+  evidence. `scripts/tomorrow.sh` does the same for the next session, after
+  scoring today's recorded picks.
+- **Kept current daily**: `scripts/refresh.sh` runs after stock-analyzer's
+  evening batch has stored the day. It scores the recorded picks, retrains
+  every model in use on the new session, redoes the held-out checks weekly
+  and prunes superseded models. `scripts/schedule-refresh.sh` installs it in
+  launchd for 19:15 on weekdays.
 
 ### API
 
@@ -607,7 +648,7 @@ held-out metrics slowly become a historical curiosity.
 stock-predictor/
 ├── pyproject.toml
 ├── params.example.toml  candidate-input parameters, all defaults (section 4.1)
-├── scripts/today.sh     the on-demand summary (section 7)
+├── scripts/            today.sh, tomorrow.sh (section 7), refresh.sh + schedule-refresh.sh (daily)
 ├── src/stock_predictor/
 │   ├── params.py      the parameters: defaults, TOML/JSON file, --set overrides
 │   ├── filters.py     hard filter rules over the candidate inputs
@@ -619,8 +660,9 @@ stock-predictor/
 │   ├── models/        barrier labels, GBDT backend, stage 1, stage 2, calibration, registry, training set
 │   ├── eval/          splits, baselines, charges, metrics, backtest, ablation, fixed targets, screener evidence
 │   ├── serving/       FastAPI app, scheduler, cache, live board and dashboard, on-demand summary
-│   └── cli.py         build-features | train | predict | summary | evaluate | evaluate-target
-│                      | screener-evidence | backtest | ablate | params | frames | serve | score
+│   └── cli.py         build-features | train | predict | summary | models | evaluate
+│                      | evaluate-target | screener-evidence | backtest | ablate | params | frames
+│                      | serve | score
 ├── tests/
 └── docs/              DESIGN.md (this), ARCHITECTURE.md
 ```
