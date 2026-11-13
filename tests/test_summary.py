@@ -67,10 +67,24 @@ def test_summary_filters_lists_groups_and_explains():
     assert "7 minutes behind" in notes
 
     assert s["top"][1]["range_price"] == pytest.approx([200.60, 203.00])  # B: 200 raised by +0.30% and +1.5%
+    # entry: 0.6% below the low end of the range (A: 100.55 -> 99.95), never above the price now
+    assert s["top"][0]["entry_price"] == pytest.approx(100.55 * 0.994)
+    assert s["top"][1]["entry_price"] == pytest.approx(200.60 * 0.994)
+    assert all(r["entry_price"] <= r["price"] for r in s["all"])
+    assert all(r["range_price"][0] / r["entry_price"] >= 1 / 0.994 - 1e-9 or r["entry_price"] == r["price"]
+               for r in s["all"])
+    high_floor = _rows()
+    high_floor.loc[0, "p25"] = 1.0  # a floor already 1% up: the margin is there at the price now
+    h = build_summary(high_floor, CFG, "m", card, "2026-11-11", as_of=AT_1030, finished=AT_1030,
+                      latest_session="2026-11-09", evaluation=None)
+    assert h["top"][0]["entry_price"] == 100.0 and h["top"][0]["entry_vs_price_pct"] == 0
+    assert "100.00 (now)" in format_summary(h)
 
     text = format_summary(s)
     assert any(ln.split()[:2] == ["#", "Stock"] and "Range in price" in ln for ln in text.splitlines())
     assert "+0.55 to +2.00%    100.55 to 102.00" in text and "200.60 to 203.00" in text
+    assert any(ln.split()[:2] == ["#", "Stock"] and "Entry price" in ln for ln in text.splitlines())
+    assert "100.55 to 102.00  99.95 (-0.1%)" in text and "Entry price: the most to pay. It is 0.6% below" in text
     assert "5 of 6 stocks have a 50% or better chance" in text
     assert "+0.70 to +0.79%  C, D" in text
     assert "The model's top 5: 69%; the 5 most volatile stocks: 69% (-0.02% a trade)." in text
