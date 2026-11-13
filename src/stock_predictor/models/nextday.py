@@ -13,6 +13,13 @@ have nothing to work from. This model has one row per (symbol, session):
 * **band**: the best gain available that session, the high against the open
   (p25 / p50 / p75), and the return to the close.
 
+Other outcomes (``train --next-session --outcome``):
+
+* ``close``: the session closes X% or more above the session before's close
+  (its last price; an overnight gap counts). Band: that close-to-close return.
+* ``opportunities``: the session has at least N separate X% opportunities
+  from the open (``triple_barrier.opportunity_counts``). Band: the best gain.
+
 It is trained and evaluated exactly like the per-minute fixed targets: a
 twin without the held-out month is checked on it, and the model used live
 is trained on everything and calibrated on its last 20 sessions.
@@ -33,7 +40,9 @@ from stock_predictor.eval.charges import round_trip_cost_pct
 from stock_predictor.models.training import model_feature_columns
 
 ENTRY = "next_open"  # ModelCard.entry for these models
-OUTCOME_COLUMNS = ("open", "max_gain_pct", "close_return_pct", "label_class", "range_prev_pct")
+# What the session did: never features.
+OUTCOME_COLUMNS = ("open", "max_gain_pct", "close_return_pct", "label_class", "range_prev_pct",
+                   "session_close", "prev_session_close", "close_vs_prev_pct", "opportunities")
 
 
 # -- the calendar ---------------------------------------------------------------
@@ -85,33 +94,51 @@ def state_at(frame, as_of: int):
 
 def session_outcomes(views, session_date: str, target_pct: float):
     """Per symbol: the session's open, its best gain from the open, the return
-    from the open to the close, and whether +target_pct was reached."""
+    from the open to the close, whether +target_pct was reached, its last
+    price, and how many separate +target_pct opportunities it had."""
     import pandas as pd
 
-    rows = {}
+    from stock_predictor.models.triple_barrier import opportunity_counts
+
+    by: dict[str, list] = {}
     for c in views.intraday_candles(session_date):
-        r = rows.get(c.symbol)
-        if r is None:
-            rows[c.symbol] = [c.open, c.high, c.low, c.close]
-        else:
-            r[1], r[2], r[3] = max(r[1], c.high), min(r[2], c.low), c.close
+        by.setdefault(c.symbol, []).append(c)
     out = []
-    for sym, (op, hi, lo, cl) in rows.items():
+    for sym, cs in by.items():
+        op, cl = cs[0].open, cs[-1].close
         if not op or op <= 0:
             continue
+        hi, lo = max(c.high for c in cs), min(c.low for c in cs)
         gain = max(hi / op - 1.0, 0.0) * 100.0
+        opps = opportunity_counts([c.high for c in cs], [c.low for c in cs], [c.ts_epoch for c in cs], target_pct)
         out.append({"symbol": sym, "open": op, "max_gain_pct": gain,
                     "close_return_pct": (cl / op - 1.0) * 100.0,
                     "label_class": int(hi >= op * (1 + target_pct / 100.0)),
-                    "range_pct": (hi - lo) / cl * 100.0 if cl else np.nan})
+                    "range_pct": (hi - lo) / cl * 100.0 if cl else np.nan,
+                    "session_close": cl, "opportunities": int(opps[0])})
     return pd.DataFrame(out)
 
 
+def apply_outcome(rows, target_pct: float, outcome: str = "touch", count: int = 1):
+    """Set ``label_class`` for ``outcome`` (``touch`` is what session_outcomes
+    already set). ``close`` needs ``prev_session_close``."""
+    if outcome == "close":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rows["close_vs_prev_pct"] = (rows["session_close"] / rows["prev_session_close"] - 1.0) * 100.0
+        rows = rows[rows["close_vs_prev_pct"].notna()].copy()
+        rows["label_class"] = (rows["close_vs_prev_pct"] >= target_pct - 1e-9).astype(int)
+    elif outcome == "opportunities":
+        rows["label_class"] = (rows["opportunities"] >= count).astype(int)
+    return rows
+
+
 def next_session_set(views, source, sessions: Sequence[str], target_pct: float,
-                     progress: Optional[Callable[[int, int, str], None]] = None):
+                     progress: Optional[Callable[[int, int, str], None]] = None,
+                     outcome: str = "touch", count: int = 1):
     """One row per (symbol, session) for every session in ``sessions`` that has
     the session before it: features at 15:00 the session before, the outcome
-    from this session's open. ``source`` is a FrameSource (saved frames)."""
+    from this session's open (or, for ``close``, from the session before's
+    close). ``source`` is a FrameSource (saved frames)."""
     import pandas as pd
 
     parts = []
@@ -127,13 +154,17 @@ def next_session_set(views, source, sessions: Sequence[str], target_pct: float,
         out = session_outcomes(views, sd, target_pct)
         if out.empty:
             continue
-        # The widest range the session before: a baseline, never a feature.
+        # The session before: its widest range (a baseline, never a feature)
+        # and its close (what "close" outcomes are measured from).
+        keep = ["symbol", "range_pct", "session_close"]
         if prev_range is None or prev_range[0] != prev:
-            prev_range = (prev, session_outcomes(views, prev, target_pct)[["symbol", "range_pct"]])
+            prev_range = (prev, session_outcomes(views, prev, target_pct)[keep])
         rows = state.merge(out.drop(columns=["range_pct"]), on="symbol", how="inner")
-        rows = rows.merge(prev_range[1].rename(columns={"range_pct": "range_prev_pct"}), on="symbol", how="left")
-        prev_range = (sd, out[["symbol", "range_pct"]])
-        parts.append(rows.assign(session_date=sd, base_session=prev))
+        rows = rows.merge(prev_range[1].rename(columns={"range_pct": "range_prev_pct",
+                                                        "session_close": "prev_session_close"}),
+                          on="symbol", how="left")
+        prev_range = (sd, out[keep])
+        parts.append(apply_outcome(rows, target_pct, outcome, count).assign(session_date=sd, base_session=prev))
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
@@ -175,14 +206,31 @@ def calibrate(rows, names: Sequence[str], last_n: int = 20):
     return cal, table
 
 
-def fit(rows, names: Sequence[str], calibrate_last: int = 20):
-    """A ForwardModel whose classifier predicts reaching the target from the
-    open and whose band is the best gain from the open."""
+def band_of(outcome: str) -> tuple[str, str]:
+    """(ForwardModel.band, the rows' column it describes) for ``outcome``."""
+    if outcome == "close":
+        return "forward_return_pct", "close_vs_prev_pct"
+    return "max_gain_pct", "max_gain_pct"
+
+
+def describe(target_pct: float, outcome: str = "touch", count: int = 1) -> str:
+    if outcome == "close":
+        return f"the next session closes +{target_pct:g}% or more above this one's close"
+    if outcome == "opportunities":
+        return f"{count}+ separate +{target_pct:g}% opportunities in the next session"
+    return f"+{target_pct:g}% from the next session's open, before its close"
+
+
+def fit(rows, names: Sequence[str], calibrate_last: int = 20, outcome: str = "touch"):
+    """A ForwardModel whose classifier predicts the outcome and whose band is
+    the best gain from the open (or, for ``close``, the close-to-close return)."""
     from stock_predictor.models.forward import ForwardModel
 
-    model = ForwardModel(feature_names=list(names), band="max_gain_pct")
+    band, col = band_of(outcome)
+    returns = rows[col if band == "forward_return_pct" else "close_return_pct"].to_numpy(dtype=float)
+    model = ForwardModel(feature_names=list(names), band=band)
     model.fit_matrix(matrix(rows, names), rows["label_class"].to_numpy(),
-                     rows["close_return_pct"].to_numpy(dtype=float), rows["max_gain_pct"].to_numpy(dtype=float))
+                     returns, rows["max_gain_pct"].to_numpy(dtype=float))
     cal, table = calibrate(rows, names, calibrate_last) if calibrate_last > 0 else (None, [])
     model.calibrator = cal
     return model, table
@@ -202,10 +250,11 @@ class NextSessionReport:
     band_coverage: dict
     filters: list[dict]
     by_symbol: Optional[dict] = None
+    target_text: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
-            "target": f"+{self.target_pct:g}% from the next session's open, before its close",
+            "target": self.target_text or describe(self.target_pct),
             "entry": ENTRY, "sessions": [self.sessions[0], self.sessions[-1]],
             "session_count": len(self.sessions), "top_n": self.n, "cost_pct": self.cost_pct,
             "summary": self.summary, "calibration": self.calibration,
@@ -217,10 +266,14 @@ class NextSessionReport:
         }
 
 
-def evaluate_next_session(model, rows, target_pct: float, n: int = 5, views=None) -> NextSessionReport:
+def evaluate_next_session(model, rows, target_pct: float, n: int = 5, views=None,
+                          outcome: str = "touch", count: int = 1) -> NextSessionReport:
     """Each session: the model's top ``n`` by P against every stock, the ``n``
     with the widest range the session before, and the ``n`` widest 20-day ATR.
-    A trade buys at the open and sells at the target or the close."""
+    A trade buys at the open and sells at the target or the close. For
+    ``close``, it buys at the session before's close and sells at this close;
+    for ``opportunities``, it buys at the open and holds to the close (the
+    opportunities themselves need hindsight on the timing)."""
     from stock_predictor.eval.target import CALIBRATION_EDGES
     from stock_predictor.eval.baselines import highest_volatility
 
@@ -230,7 +283,12 @@ def evaluate_next_session(model, rows, target_pct: float, n: int = 5, views=None
     rows["p_seen"] = pred.p_seen if pred.p_seen is not None else np.nan
     cost = round_trip_cost_pct(1000.0, 1000.0 * (1 + target_pct / 100.0))
     rows["hit"] = rows["label_class"] > 0
-    rows["net"] = np.where(rows["hit"], target_pct, rows["close_return_pct"]) - cost
+    if outcome == "close":
+        rows["net"] = rows["close_vs_prev_pct"] - cost
+    elif outcome == "opportunities":
+        rows["net"] = rows["close_return_pct"] - cost
+    else:
+        rows["net"] = np.where(rows["hit"], target_pct, rows["close_return_pct"]) - cost
 
     def top(col):
         return rows.sort_values(col, ascending=False, kind="stable").groupby("session_date").head(n)
@@ -252,13 +310,14 @@ def evaluate_next_session(model, rows, target_pct: float, n: int = 5, views=None
         if m.any():
             calibration.append({"band": f"({lo}, {hi}]", "rows": int(m.sum()), "predicted": float(rows.loc[m, "p"].mean()),
                                 "hit": float(rows.loc[m, "hit"].mean()), "net": float(rows.loc[m, "net"].mean())})
-    coverage = {"band": "max_gain_pct",
-                **{q: float((rows["max_gain_pct"] <= rows[f"band_{q}"]).mean()) for q in ("p25", "p50", "p75")}}
+    col = band_of(outcome)[1]
+    coverage = {"band": col, **{q: float((rows[col] <= rows[f"band_{q}"]).mean()) for q in ("p25", "p50", "p75")}}
     per_session = rows["session_date"].nunique()
     filters = []
-    for rule, keep in (("chance >= 50% (model's P)", rows["p"] >= 0.5),
-                       ("chance >= 50% (calibrated)", rows["p_seen"] >= 0.5),
-                       (f"band median >= +{target_pct:g}%", rows["band_p50"] >= target_pct)):
+    rules = [("chance >= 50% (model's P)", rows["p"] >= 0.5), ("chance >= 50% (calibrated)", rows["p_seen"] >= 0.5)]
+    if outcome != "opportunities":  # there the band (best gain) is not what the target counts
+        rules.append((f"band median >= +{target_pct:g}%", rows["band_p50"] >= target_pct))
+    for rule, keep in rules:
         k = rows[keep.fillna(False).to_numpy(dtype=bool)]
         if len(k):
             filters.append({"rule": rule, "rows": int(len(k)), "per_session_point": len(k) / per_session,
@@ -268,4 +327,4 @@ def evaluate_next_session(model, rows, target_pct: float, n: int = 5, views=None
     sessions = sorted(rows["session_date"].unique())
     rows["chance"] = rows["p_seen"].fillna(rows["p"])
     return NextSessionReport(target_pct, sessions, n, cost, summary, calibration, coverage, filters,
-                             by_symbol_record(rows))
+                             by_symbol_record(rows), describe(target_pct, outcome, count))

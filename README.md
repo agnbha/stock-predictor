@@ -201,6 +201,10 @@ the top 5, selling at +0.5% or at the close, made +0.03% a trade after
   grouped by median), with the range also as prices ("Range in price": the
   price now raised by the p25 and p75 gains; for `tomorrow.sh`, worked from
   the latest price, as the open is not known yet);
+- an "Entry price" for each: the most to pay, 0.6% below the low end of the
+  range in price (the price now when it is already that far below). A buy
+  limit under the price now may never fill, and the chance is for buying at
+  the price now, so the model has not been tested on that entry;
 - the stand-outs;
 - the held-out evidence on how far to trust it.
 
