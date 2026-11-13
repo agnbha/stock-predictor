@@ -561,6 +561,16 @@ as the evidence for how far to trust it.
 | +1% within 40 minutes, top 5 | held-out month, 21 sessions | 18.3% | most volatile now 21.4% | 5.5% | −0.06% (screen −0.05%) |
 | +0.5% before the close, top 5 | held-out month, 21 sessions | 69% | most volatile now 69% | 55% | +0.03% (every stock +0.03%) |
 | +0.5% above the next open, top 5 | held-out month, 21 sessions | 69% | widest range the day before 83% | 73% | −0.49% (screen −0.14%, every stock −0.06%) |
+| Closes +1% above the price now, top 5 | held-out month 2026-10-14..11-12, 21 sessions | 23.5% | most volatile now 21.7% | 16.3% | +0.24% held to the close (screen +0.05%) |
+| 2+ separate +0.6% opportunities from now, top 5 | same | 77.8% | most volatile now 77.8% | 51.6% | — |
+| 5+ separate +0.6% opportunities from now, top 5 | same | 39.0% | most volatile now 42.7% | 13.7% | — |
+| 2+ separate +1% opportunities from now, top 5 | same | 43.1% | most volatile now 48.1% | 18.8% | — |
+| Next session closes +1% above this close, top 5 | same | 34.3% | widest range the day before 40.0% | 30.6% | +0.17% (screen +0.33%) |
+| 2+ separate +0.6% opportunities next session, top 5 | same | 96.2% | widest range the day before 96.2% | 91.5% | — |
+| 5+ separate +0.6% opportunities next session, top 5 | same | 86.7% | widest range the day before 86.7% | 57.1% | — |
+| 2+ separate +1% opportunities next session, top 5 | same | 85.7% | widest 20-day ATR 90.5% | 62.4% | — |
+
+Opportunities need perfect timing, so they have no net per trade.
 
 What follows from it:
 
@@ -580,6 +590,18 @@ What follows from it:
 - **"+0.5% before the close" is the norm, not a signal.** From 10:30, more
   than half of these stocks trade 0.5% above that price at some point before
   the close. A filter on it keeps most of the universe.
+- **So are two +0.6% opportunities.** 91% of stock-sessions hold two, and a
+  whole session's median is five. The stricter versions, five of +0.6% or two
+  of +1%, are met by 14–19% of stocks from a given point in the day (46–50% from
+  09:30, about 12–19% from noon) and 57–62% over a whole next session. There
+  the models rank about three times above the base rate, and their chances
+  are honest: the top 5 were given 41–44% today, and 39–43% came true. The
+  volatility screens still match or beat them.
+- **A close above is the one place a model edges a screen.** For "closes +1%
+  above the price now", the top 5 reached it 23.5% of the time against 21.7%
+  for the most volatile stocks. They were given 30%, so the chance runs high.
+  For the next session's close against today's, the widest range the day
+  before does better (40.0% against 34.3%).
 
 ---
 

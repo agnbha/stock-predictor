@@ -250,6 +250,49 @@ gain beat the median 59–61% of the time). The held-out month was busier than
 the month before it too, so a recent window did not catch up with it. The
 scripts train on the full history, at every minute.
 
+### Other outcomes: a close above, or several opportunities
+
+`train --outcome` changes what reaching the target means (design §1.2, §1.3):
+
+- `close`: the session closes X% or more above the price now. With
+  `--next-session`, it closes X% above this session's close.
+- `opportunities --count N`: at least N separate X% opportunities, as
+  stock-analyzer's detector marks them. Each is a buy at a candle's low and a
+  sale at a later candle's high, at least 5 minutes apart and not
+  overlapping. The count assumes perfect timing.
+
+```bash
+# today.sh's kind (every minute) and tomorrow.sh's kind (the next session)
+stock-predictor train --target 1 --to-close --outcome close --band return --minute-step 1 --all-sessions
+stock-predictor train --target 0.6 --to-close --outcome opportunities --count 5 --band max-gain --minute-step 1 --all-sessions
+stock-predictor train --target 1 --next-session --outcome close --all-sessions
+# the held-out check: train without --all-sessions, then
+stock-predictor evaluate-target --holdout --model <that version> --record
+```
+
+All eight are trained and their held-out checks recorded. `today.sh`,
+`tomorrow.sh` and the dashboard still use only the "+X% at some point" models.
+On the held-out month (2026-10-14 to 2026-11-12), the share of the top 5 that
+reached each outcome was:
+
+| Outcome | Model's top 5 | Most volatile now (today) / widest range before (next) | Every stock |
+|---|---|---|---|
+| Closes +1% above the price now | 23.5% | 21.7% | 16.3% |
+| 2+ separate +0.6% opportunities from now | 77.8% | 77.8% | 51.6% |
+| 5+ separate +0.6% opportunities from now | 39.0% | 42.7% | 13.7% |
+| 2+ separate +1% opportunities from now | 43.1% | 48.1% | 18.8% |
+| Next session closes +1% above today's close | 34.3% | 40.0% | 30.6% |
+| 2+ separate +0.6% opportunities next session | 96.2% | 96.2% | 91.5% |
+| 5+ separate +0.6% opportunities next session | 86.7% | 86.7% | 57.1% |
+| 2+ separate +1% opportunities next session | 85.7% | 86.7% | 62.4% |
+
+Two +0.6% opportunities is what almost every stock has: a whole session's
+median is five. The stricter versions separate stocks, and the models rank
+them well above the base rate with honest chances. The volatility screen
+still does as well or better. The one model ahead of its screen, closing +1%
+above the price now, is ahead only narrowly, and its chance runs high (30%
+given, 23.5% seen).
+
 ### Tomorrow, the scorecard and the daily refresh
 
 **`scripts/tomorrow.sh`** (`today.sh --tomorrow`) answers the same question
