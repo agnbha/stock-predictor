@@ -197,6 +197,12 @@ the top 5, selling at +0.5% or at the close, made +0.03% a trade after
 
 `scripts/today.sh` prints this as a summary, on demand. It covers:
 - the stocks with a 50% or better chance;
+- each stock's **edge**: its chance minus the base rate, which is how often any
+  stock reached the target from the same time of day in the held-out month. A
+  60% chance at 10:30, when any stock got 59%, is an edge of +1 and says
+  nothing. Stocks 10 points or more above it are flagged (✓), together with
+  how stocks that far above it did in the held-out month. If none is, the
+  summary says so;
 - each stock's median expected gain and range (the top 15 in full, the rest
   grouped by median), with the range also as prices ("Range in price": the
   price now raised by the p25 and p75 gains; for `tomorrow.sh`, worked from
@@ -211,6 +217,12 @@ the top 5, selling at +0.5% or at the close, made +0.03% a trade after
 It retrains the model first when a session has finished since it was trained
 (about 2 minutes); otherwise it takes about 7 seconds. Options:
 - `--target 1`: a different gain;
+- `--stop 0.5`: ask "+0.5% **before it falls 0.5%**, by the close" instead,
+  from a model trained on that question (it trains one if needed). The plain
+  question ignores the downside: a stock can touch +0.5% and still close well
+  below the price you paid. Today's session only;
+- `--min-edge 15`: flag only stocks 15 or more points above the base rate
+  (default 10);
 - `--min-chance 60`: a stricter cut;
 - `--top 20`: list more stocks in full;
 - `--at 11:00`: an earlier minute;
@@ -515,5 +527,5 @@ tests/               leakage, targets, splits, metrics, charges, baselines,
 ## Tests
 
 ```bash
-pytest -q          # 99 tests; those needing stock-analyzer's DB skip cleanly without it
+pytest -q          # 113 tests; those needing stock-analyzer's DB skip cleanly without it
 ```

@@ -417,7 +417,8 @@ def cmd_summary(args) -> int:
         if args.at else None
     try:
         s = summarise(args.target, args.min_chance / 100, args.top, args.model, session, at,
-                      recent=args.recent, next_session=args.next_session)
+                      recent=args.recent, next_session=args.next_session, stop_pct=args.stop,
+                      min_edge=args.min_edge)
     except SummaryUnavailable as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -531,6 +532,7 @@ def cmd_evaluate_target(args) -> int:
     for f in rep.filters:
         print(f"filter {f['rule']}: {f['per_session_point']:.1f} symbols per point, "
               f"{f['hit']:.1%} reached the target ({f['rows']:,} rows); every symbol: {rep.summary['base_hit']:.1%}")
+    _print_by_edge(rep.by_edge)
     print("\n" + json.dumps(rep.summary, indent=1))
     if args.csv:
         t.to_csv(args.csv, index=False)
@@ -553,6 +555,17 @@ def cmd_evaluate_target(args) -> int:
         data["model_version"] = version
         print(f"recorded -> {ModelRegistry().save_extra(version, 'evaluation', data)}")
     return 0
+
+
+def _print_by_edge(buckets) -> None:
+    if not buckets:
+        return
+    print("\nby edge (chance minus the base rate at the same point, in points):")
+    for b in buckets:
+        lo = "below 0" if b["from"] <= -100 else f"{b['from']:+d}"
+        hi = "" if b["to"] >= 100 else f" to {b['to']:+d}"
+        name = lo if b["from"] <= -100 else (f"{lo} or more" if not hi else f"{lo}{hi}")
+        print(f"  {name:<14} rows {b['rows']:>6,}  reached {b['hit']:.1%}  (base {b['base']:.1%})  net {b['net']:+.3f}%")
 
 
 def _evaluate_next_session(args, version, model, card, cfg) -> int:
@@ -589,6 +602,7 @@ def _evaluate_next_session(args, version, model, card, cfg) -> int:
     for f in rep.filters:
         print(f"filter {f['rule']}: {f['per_session_point']:.1f} symbols a session, {f['hit']:.1%} reached "
               f"the target ({f['rows']:,} rows); every symbol: {s['base_hit']:.1%}")
+    _print_by_edge(rep.by_edge)
     if args.json:
         with open(args.json, "w") as fh:
             json.dump(rep.to_dict(), fh, indent=1)
@@ -932,6 +946,10 @@ def build_parser() -> argparse.ArgumentParser:
     su.add_argument("--target", type=float, default=0.5, metavar="PCT", help="the gain, in %% (default 0.5)")
     su.add_argument("--min-chance", type=float, default=50, metavar="PCT",
                     help="keep stocks with at least this chance (default 50)")
+    su.add_argument("--stop", type=float, metavar="PCT",
+                    help="use the model for +target before -PCT%%, by the close (train --stop PCT --to-close)")
+    su.add_argument("--min-edge", type=float, default=10, metavar="PTS",
+                    help="flag stocks whose chance is at least this many points above the base rate (default 10)")
     su.add_argument("--top", type=int, default=15, help="stocks listed in full (default 15); the rest are grouped")
     su.add_argument("--model", help="a model version (default: the latest for the target)")
     su.add_argument("--session", help="a past session instead of today's (YYYY-MM-DD)")

@@ -9,7 +9,8 @@ A fixed target instead asks a plain question: does the price touch
 +``target_pct`` within the next H minutes? ``stop_pct`` adds a lower barrier
 at -``stop_pct``, so the label becomes "target before stop". ``to_close``
 replaces the H minutes with the rest of the session: does the price touch
-+``target_pct`` at any point before the close?
++``target_pct`` at any point before the close? With a stop as well, does it
+touch the target before it falls ``stop_pct`` (by the close)?
 
 Every mode also reports ``max_gain_pct``: the best high in the window against
 the entry, the most a buyer at that close could have sold for.
@@ -67,8 +68,10 @@ class TripleBarrierConfig:
     count: int = 1
 
     def __post_init__(self) -> None:
-        if self.to_close and (self.target_pct is None or self.stop_pct is not None):
-            raise ValueError("to_close needs a fixed target (target_pct) and no stop")
+        if self.to_close and self.target_pct is None:
+            raise ValueError("to_close needs a fixed target (target_pct)")
+        if self.to_close and self.stop_pct is not None and self.outcome != "touch":
+            raise ValueError("a stop goes with the touch outcome only")
         if self.outcome not in OUTCOMES:
             raise ValueError(f"outcome must be one of {', '.join(OUTCOMES)}")
         if self.outcome != "touch" and not self.to_close:
@@ -86,6 +89,8 @@ class TripleBarrierConfig:
                 return f"a close +{self.target_pct:g}% or more above the entry"
             if self.outcome == "opportunities":
                 return f"{self.count}+ separate +{self.target_pct:g}% opportunities before the close"
+            if self.stop_pct is not None:
+                return f"+{self.target_pct:g}% before -{self.stop_pct:g}%, by the close"
             return f"+{self.target_pct:g}% before the close"
         h = f"{self.horizon_minutes} min"
         if not self.fixed:
@@ -243,6 +248,16 @@ def _to_close(cl: np.ndarray, hi: np.ndarray, lo: np.ndarray, t: np.ndarray,
     last = t[-1] if n else 0
     minutes = np.where(hit, (t[np.minimum(first, n - 1)] - t) // 60, (last - t) // 60)
     out = {}
+    if cfg.stop_pct is not None:
+        # The first candle whose low reaches the stop; one candle reaching
+        # both counts as stopped, as in the fixed-horizon windows.
+        dn = cl * (1 - cfg.stop_pct / 100.0)
+        first_dn = first_reach(-lo, -dn)
+        stopped = (first_dn < n) & (first_dn <= first)
+        hit = hit & ~stopped
+        label = np.where(stopped, -1, np.where(hit, 1, 0)).astype(np.int8)
+        at = np.minimum(np.where(stopped, first_dn, first), n - 1)
+        minutes = np.where(stopped | hit, (t[at] - t) // 60, (last - t) // 60)
     if cfg.outcome == "close":
         label = (fwd >= target_pct - 1e-9).astype(np.int8)
         minutes = (last - t) // 60

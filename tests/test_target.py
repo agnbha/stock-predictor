@@ -226,8 +226,8 @@ def test_to_close_is_touching_the_target_before_the_close():
     np.testing.assert_allclose(a["max_gain_pct"], [0.6, 0.6, 0.0, 0.0, 0.0], atol=1e-9)
     np.testing.assert_allclose(a["forward_return_pct"], [-1.0, -1.0, (99 / 100.4 - 1) * 100, -1.0, 0.0])
     assert a["complete"].all()
-    with pytest.raises(ValueError):
-        TripleBarrierConfig(target_pct=0.5, stop_pct=0.5, to_close=True)
+    with pytest.raises(ValueError):  # a stop goes with "touch" only (tests/test_edge_and_stop.py)
+        TripleBarrierConfig(target_pct=0.5, stop_pct=0.5, to_close=True, outcome="close")
     with pytest.raises(ValueError):
         TripleBarrierConfig(to_close=True)
 

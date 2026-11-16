@@ -14,6 +14,14 @@ with ``--target PCT --to-close --band max-gain``:
 "How much to trust it" comes from the held-out check kept beside a model
 trained on the same target without the last month (``evaluate-target
 --holdout --record``).
+
+**Edge** is a stock's chance minus the base rate: how often any stock did it
+from the same time of day in that held-out month. A 60% chance when any stock
+gets 59% says nothing. Stocks ``min_edge`` points or more above it are flagged,
+with how stocks that far above it did in the held-out month.
+
+With a stop (``today.sh --stop 0.5``), the chance is P(+target before -stop,
+by the close), from a model trained on that question.
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ import numpy as np
 
 from stock_predictor.clock import NSE
 from stock_predictor.config import LAST_INTRADAY_POINT
+from stock_predictor.eval.target import edge_record
 from stock_predictor.models.registry import ModelRegistry, card_target
 from stock_predictor.models.triple_barrier import TripleBarrierConfig
 
@@ -36,23 +45,42 @@ from stock_predictor.models.triple_barrier import TripleBarrierConfig
 # How far below the sale price an entry has to be: about the target plus a round
 # trip's costs (0.5% + 0.08%), rounded up.
 ENTRY_MARGIN_PCT = 0.6
+# A stock is flagged when its chance is this many percentage points above the base rate.
+DEFAULT_MIN_EDGE = 10.0
 
 
 class SummaryUnavailable(RuntimeError):
     """Nothing to summarise yet: no model for the target, or no candles."""
 
 
-def target_config(target_pct: float) -> TripleBarrierConfig:
-    return TripleBarrierConfig(target_pct=target_pct, to_close=True)
+def target_config(target_pct: float, stop_pct: Optional[float] = None) -> TripleBarrierConfig:
+    return TripleBarrierConfig(target_pct=target_pct, stop_pct=stop_pct, to_close=True)
+
+
+def base_rate_at(evaluation: Optional[dict], hhmm: str, next_session: bool = False) -> Optional[float]:
+    """How often any stock reached the target in the held-out month: from the
+    time of day ``hhmm`` (between the checked points, interpolated), or for
+    the next session, over the month."""
+    if not evaluation:
+        return None
+    if next_session:
+        return float(evaluation["summary"]["base_hit"])
+    pts = sorted((p["point"], p["base_hit"]) for p in evaluation.get("by_point") or []
+                 if p.get("base_hit") is not None)
+    if not pts:
+        return float(evaluation["summary"]["base_hit"])
+    minutes = [int(p[:2]) * 60 + int(p[3:]) for p, _ in pts]
+    return float(np.interp(int(hhmm[:2]) * 60 + int(hhmm[3:]), minutes, [v for _, v in pts]))
 
 
 def find_model(registry: ModelRegistry, target_pct: float, recent: bool = False,
-               next_session: bool = False) -> Optional[str]:
+               next_session: bool = False, stop_pct: Optional[float] = None) -> Optional[str]:
     """The to-the-close model for ``target_pct`` trained through the latest
     session (of those, the one saved last): trained on every session, or with
     ``recent`` on only the last few weeks (``train --recent-days``). With
-    ``next_session``, the model for the session after (``train --next-session``)."""
-    want = asdict(target_config(target_pct))
+    ``next_session``, the model for the session after (``train --next-session``);
+    with ``stop_pct``, the one for +target before -stop."""
+    want = asdict(target_config(target_pct, stop_pct))
     entry = "next_open" if next_session else "minute"
     found = [c for c in registry.cards()
              if c.target == want and c.band == "max_gain_pct" and bool(c.recent_days) == recent
@@ -61,12 +89,12 @@ def find_model(registry: ModelRegistry, target_pct: float, recent: bool = False,
 
 
 def model_state(target_pct: float, registry: Optional[ModelRegistry] = None, views=None,
-                recent: bool = False, next_session: bool = False) -> str:
+                recent: bool = False, next_session: bool = False, stop_pct: Optional[float] = None) -> str:
     """'missing', 'stale' (trained before the latest finished session) or 'ok'."""
     from stock_predictor.data.analyzer import AnalyzerViews
 
     registry = registry or ModelRegistry()
-    version = find_model(registry, target_pct, recent, next_session)
+    version = find_model(registry, target_pct, recent, next_session, stop_pct)
     if version is None:
         return "missing"
     own = views is None
@@ -109,7 +137,8 @@ def build_summary(rows, cfg: TripleBarrierConfig, version: str, card, session: s
                   min_chance: float = 0.5, top: int = 15, now: Optional[int] = None,
                   capped: bool = False, live: bool = True,
                   next_session: Optional[dict] = None,
-                  entry_margin_pct: float = ENTRY_MARGIN_PCT) -> dict[str, Any]:
+                  entry_margin_pct: float = ENTRY_MARGIN_PCT,
+                  min_edge: float = DEFAULT_MIN_EDGE) -> dict[str, Any]:
     """Everything the summary says, as plain data (``--json`` writes it)."""
     now = now or int(time.time())
     target = cfg.target_pct
@@ -117,6 +146,11 @@ def build_summary(rows, cfg: TripleBarrierConfig, version: str, card, session: s
     head, rest = passed.head(top), passed.iloc[top:]
 
     record = (evaluation or {}).get("by_symbol") or {}
+    as_of_time = NSE.time_of(as_of).strftime("%H:%M")
+    base = base_rate_at(evaluation, as_of_time, bool(next_session))
+
+    def edge_of(r) -> Optional[float]:
+        return round((float(r["chance"]) - base) * 100, 6) if base is not None else None
 
     def row(r) -> dict:
         price = float(r["price"])
@@ -130,6 +164,7 @@ def build_summary(rows, cfg: TripleBarrierConfig, version: str, card, session: s
                 "p_model": float(r["p_model"]), "median_gain_pct": float(r["p50"]),
                 "range_pct": [float(r["p25"]), float(r["p75"])], "range_price": [low, high],
                 "entry_price": entry, "entry_vs_price_pct": (entry / price - 1) * 100 if price else 0.0,
+                "edge_pts": edge_of(r), "flagged": base is not None and edge_of(r) >= min_edge,
                 "target_price": float(price * (1 + target / 100)), "vol_rank": int(r["vol_rank"])}
 
     groups = []
@@ -140,10 +175,19 @@ def build_summary(rows, cfg: TripleBarrierConfig, version: str, card, session: s
             groups.append({"from_pct": float(lo), "to_pct": float(lo + 0.09),
                            "symbols": list(g["symbol"])})
 
+    every = [{**row(r), "rank": i + 1, "passed": bool(r["chance"] >= min_chance),
+              "p25": float(r["p25"]), "p50": float(r["p50"]), "p75": float(r["p75"])}
+             for i, (_, r) in enumerate(rows.iterrows())]
     s: dict[str, Any] = {
-        "target_pct": target, "question": cfg.describe(), "session": session, "live": live,
-        "next_session": next_session,
-        "as_of": as_of, "as_of_time": NSE.time_of(as_of).strftime("%H:%M"),
+        "target_pct": target, "stop_pct": cfg.stop_pct, "question": cfg.describe(), "session": session,
+        "live": live, "next_session": next_session,
+        "as_of": as_of, "as_of_time": as_of_time,
+        "edge": {"base": base, "min_edge": min_edge,
+                 "flagged": [{"symbol": r["symbol"], "edge_pts": r["edge_pts"], "chance": r["chance"]}
+                             for r in every if r["flagged"]],
+                 "best": max((r["edge_pts"] for r in every), default=None) if base is not None else None,
+                 "record": edge_record(evaluation, min_edge),
+                 "recorded": bool((evaluation or {}).get("by_edge"))},
         "lag_minutes": max(0, (now - finished - 60) // 60) if finished and live else None,
         "model_version": version, "trained_through": card.trained_through,
         "trained_from": getattr(card, "trained_from", "") or None,
@@ -154,9 +198,7 @@ def build_summary(rows, cfg: TripleBarrierConfig, version: str, card, session: s
         "min_chance": min_chance, "universe": int(len(rows)), "passed": int(len(passed)),
         "top": [row(r) for _, r in head.iterrows()],
         # every stock, in rank order, for recording (summary --record) and --json
-        "all": [{**row(r), "rank": i + 1, "passed": bool(r["chance"] >= min_chance),
-                 "p25": float(r["p25"]), "p50": float(r["p50"]), "p75": float(r["p75"])}
-                for i, (_, r) in enumerate(rows.iterrows())],
+        "all": every,
         "track_record": {"sessions": (evaluation or {}).get("sessions"),
                          "model_version": (evaluation or {}).get("model_version")} if record else None,
         "rest": {"count": int(len(rest)),
@@ -189,7 +231,8 @@ def build_summary(rows, cfg: TripleBarrierConfig, version: str, card, session: s
             "calibrated_filter": filt.get("chance >= 50% (calibrated)"),
         }
     else:
-        s["notes"].append("No held-out check for this target yet: run scripts/today.sh --evaluate.")
+        script = "tomorrow.sh" if next_session else "today.sh" + (f" --stop {cfg.stop_pct:g}" if cfg.stop_pct else "")
+        s["notes"].append(f"No held-out check for this target yet: run scripts/{script} --evaluate.")
     judged = next_session["date"] if next_session else session
     if judged <= card.trained_through:
         s["notes"].append(f"The model was trained on sessions through {card.trained_through}, including "
@@ -219,9 +262,11 @@ def _pct(x: Optional[float], d: int = 0) -> str:
 def format_summary(s: dict[str, Any], width: int = 100) -> str:
     if s.get("next_session"):
         return _format_next(s, width)
-    t = s["target_pct"]
+    t, stop = s["target_pct"], s.get("stop_pct")
+    before = f"before falling {stop:g}% (by 15:29)" if stop else "before 15:29"
     lines = [
-        f"Expected to gain +{t:g}% or more before {'today' if s.get('live', True) else s['session']}'s close",
+        f"Expected to gain +{t:g}% or more before {'today' if s.get('live', True) else s['session']}'s close"
+        + (f", before falling {stop:g}%" if stop else ""),
         f"{s['session']} · prices at {s['as_of_time']} IST"
         + (f" ({s['lag_minutes']} min behind the clock)" if s["lag_minutes"] else "")
         + f" · {s['model_version']}",
@@ -231,7 +276,8 @@ def format_summary(s: dict[str, Any], width: int = 100) -> str:
         + (", every minute" if s.get("minute_step", 1) == 1 else f", every {s['minute_step']} minutes") + ".",
         "",
         f"{s['passed']} of {s['universe']} stocks have a {_pct(s['min_chance'])} or better chance of trading "
-        f"{t:g}% above the price now before 15:29.",
+        f"{t:g}% above the price now {before}.",
+        *_edge_lines(s),
         "Expected gain: the best price later today against now (median, and the p25-p75 range), "
         "before costs. Where it closes can be lower.",
         "Range in price: the same p25-p75 range as prices, the best price expected later today.",
@@ -247,6 +293,38 @@ def _track(t: Optional[dict]) -> str:
     if not t:
         return ""
     return f"{t['yes_reached']:>3}/{t['said_yes']:<3} {t['right'] / t['checks'] * 100:>3.0f}%" if t["checks"] else ""
+
+
+def _edge_lines(s: dict[str, Any]) -> list[str]:
+    """The base rate now, the stocks clearly above it, and how stocks that far
+    above it did in the held-out month."""
+    e = s.get("edge") or {}
+    base = e.get("base")
+    if base is None:
+        return []  # the notes say to run --evaluate
+    nxt = bool(s.get("next_session"))
+    m = e["min_edge"]
+    when = "in a session" if nxt else f"from {s['as_of_time']}"
+    out = [f"Base rate: any stock did it {_pct(base)} of the time {when} in the held-out month. "
+           f"Edge = chance minus that, in points; flagged at +{m:g} or more."]
+    flagged = e["flagged"]
+    if flagged:
+        names = ", ".join(f"{f['symbol']} ({f['edge_pts']:+.0f})" for f in flagged[:12])
+        more = f" and {len(flagged) - 12} more" if len(flagged) > 12 else ""
+        out.append(f"Clearly above it: {names}{more}.")
+    else:
+        out.append(f"No stock is clearly above it: the best is {e['best']:+.0f} points, so even the highest "
+                   "chance is about what any stock gets.")
+    rec = e.get("record")
+    if rec:
+        out.append(f"In the held-out month, stocks +{m:g} or more above it reached the target {_pct(rec['hit'])} of the "
+                   f"time ({rec['rows']:,} {'stock-sessions' if nxt else 'checks'}), against {_pct(rec['base'])} for any "
+                   f"stock then; {rec['net']:+.2f}% a trade after costs.")
+    elif e.get("recorded"):
+        out.append(f"In the held-out month no stock was +{m:g} or more above it, so the flag has no record yet.")
+    else:
+        out.append(f"The flag's held-out record appears after scripts/{'tomorrow' if nxt else 'today'}.sh --evaluate.")
+    return out
 
 
 def _entry_note(s: dict[str, Any]) -> list[str]:
@@ -265,15 +343,18 @@ def _table(s: dict[str, Any], price_label: str) -> list[str]:
     buy = [f"{r['entry_price']:.2f} (now)" if r["entry_price"] >= r["price"]
            else f"{r['entry_price']:.2f} ({r['entry_vs_price_pct']:+.1f}%)" for r in s["top"]]
     bw = max(len("Entry price"), *map(len, buy))
-    head = (f"  {'#':>2}  {'Stock':<12} {price_label:>10}  {'Chance':>6}  {'Median':>7}   {'Range':<17}"
-            f"  {'Range in price':<{mw}}  {'Entry price':<{bw}}")
+    has_edge = (s.get("edge") or {}).get("base") is not None
+    edge = [(f"{r['edge_pts']:+.0f}" + (" ✓" if r["flagged"] else "  ")) if has_edge else "" for r in s["top"]]
+    head = (f"  {'#':>2}  {'Stock':<12} {price_label:>10}  {'Chance':>6}  " + (f"{'Edge':>6}  " if has_edge else "")
+            + f"{'Median':>7}   {'Range':<17}  {'Range in price':<{mw}}  {'Entry price':<{bw}}")
     if tr:
         head += "  Last month"
     out = [head]
     for i, r in enumerate(s["top"], start=1):
         lo, hi = r["range_pct"]
         line = (f"  {i:>2}  {r['symbol']:<12} {r['price']:>10.2f}  {_pct(r['chance']):>6}  "
-                f"{r['median_gain_pct']:>+6.2f}%   {f'{lo:+.2f} to {hi:+.2f}%':<17}  {money[i - 1]:<{mw}}  {buy[i - 1]:<{bw}}")
+                + (f"{edge[i - 1]:>6}  " if has_edge else "")
+                + f"{r['median_gain_pct']:>+6.2f}%   {f'{lo:+.2f} to {hi:+.2f}%':<17}  {money[i - 1]:<{mw}}  {buy[i - 1]:<{bw}}")
         if tr:
             line += "  " + _track(r.get("track"))
         out.append(line)
@@ -299,6 +380,7 @@ def _format_next(s: dict[str, Any], width: int) -> str:
         "",
         f"{s['passed']} of {s['universe']} stocks have a {_pct(s['min_chance'])} or better chance of trading "
         f"{t:g}% above {nd}'s open at some point before its close.",
+        *_edge_lines(s),
         "Expected gain: the best price that session against its open (median, and the p25-p75 range), "
         "before costs. An overnight gap is not counted; the price column is the latest one.",
         "Range in price: the same p25-p75 range as prices, worked from the latest price "
@@ -345,11 +427,13 @@ def _rest_and_trust(s: dict[str, Any], width: int) -> list[str]:
                       "with a model trained without them):"]
         now = (f" ({_pct(tr['base_hit_now'])} from {tr['point']})"
                if tr["base_hit_now"] is not None and not nxt else "")
-        lines.append(f"  Any stock reached +{t:g}%{' from the open' if nxt else ''} "
+        stopped = f" before -{s['stop_pct']:g}%" if s.get("stop_pct") else ""
+        lines.append(f"  Any stock reached +{t:g}%{stopped}{' from the open' if nxt else ''} "
                      f"{_pct(tr['base_hit'])} of the time{now}.")
         lines.append(f"  The model's top 5: {_pct(tr['model_top5_hit'])}; {tr.get('volatile_label', 'the 5 most volatile stocks')}: "
                      f"{_pct(tr['volatile_top5_hit'])} ({tr.get('volatile_top5_net', 0):+.2f}% a trade).")
-        lines.append(f"  Buying the top 5{' at the open' if nxt else ''}, selling at +{t:g}% or else at the close: "
+        sell = f"+{t:g}%, at -{s['stop_pct']:g}%," if s.get("stop_pct") else f"+{t:g}%"
+        lines.append(f"  Buying the top 5{' at the open' if nxt else ''}, selling at {sell} or else at the close: "
                      f"{tr['model_top5_net']:+.2f}% a trade after {tr['cost_pct']:.3f}% costs; "
                      f"buying every stock: {tr['base_net']:+.2f}%.")
         if tr["calibrated_filter"]:
@@ -368,21 +452,25 @@ def _rest_and_trust(s: dict[str, Any], width: int) -> list[str]:
 def summarise(target_pct: float = 0.5, min_chance: float = 0.5, top: int = 15,
               model_version: Optional[str] = None, session: Optional[str] = None,
               at: Optional[int] = None, registry: Optional[ModelRegistry] = None, views=None,
-              recent: bool = False, next_session: bool = False) -> dict:
+              recent: bool = False, next_session: bool = False, stop_pct: Optional[float] = None,
+              min_edge: float = DEFAULT_MIN_EDGE) -> dict:
     """Load the model, score the session in progress (or ``session``), and
     build the summary. With ``next_session``, score the session after it from
     each stock's state at 15:00 (or the latest finished session's, before the
-    open)."""
+    open). With ``stop_pct``, use the +target-before-stop model."""
     from stock_predictor.data.analyzer import AnalyzerViews
     from stock_predictor.params import Params
 
+    if stop_pct is not None and next_session:
+        raise SummaryUnavailable("--stop is for today's session only, not the next session")
     registry = registry or ModelRegistry()
-    version = model_version or find_model(registry, target_pct, recent, next_session)
+    version = model_version or find_model(registry, target_pct, recent, next_session, stop_pct)
     if version is None:
         which = ("the last-month " if recent else "") + ("next-session " if next_session else "")
+        stop = f" before -{stop_pct:g}%" if stop_pct else ""
         raise SummaryUnavailable(
-            f"no {which}model for +{target_pct:g}%: run scripts/{'tomorrow' if next_session else 'today'}.sh "
-            f"{'--recent ' if recent else ''}--retrain")
+            f"no {which}model for +{target_pct:g}%{stop}: run scripts/{'tomorrow' if next_session else 'today'}.sh "
+            f"{'--recent ' if recent else ''}{f'--stop {stop_pct:g} ' if stop_pct else ''}--retrain")
     model, card = registry.load(version)
     cfg = card_target(card)
     params = Params.from_dict(card.params) if card.params else None
@@ -392,7 +480,7 @@ def summarise(target_pct: float = 0.5, min_chance: float = 0.5, top: int = 15,
     if next_session:
         try:
             return _summarise_next(model, card, cfg, version, params, found, views, session, at,
-                                   min_chance, top)
+                                   min_chance, top, min_edge)
         finally:
             if own:
                 views.close()
@@ -413,10 +501,11 @@ def summarise(target_pct: float = 0.5, min_chance: float = 0.5, top: int = 15,
             views.close()
     return build_summary(rows, cfg, version, card, session, as_of, finished, done[-1] if done else None,
                          found[1] if found else None, min_chance, top,
-                         capped=at is None and finished > last_point, live=live)
+                         capped=at is None and finished > last_point, live=live, min_edge=min_edge)
 
 
-def _summarise_next(model, card, cfg, version, params, found, views, session, at, min_chance, top) -> dict:
+def _summarise_next(model, card, cfg, version, params, found, views, session, at, min_chance, top,
+                    min_edge: float = DEFAULT_MIN_EDGE) -> dict:
     """The session after ``session`` (default: today if it has candles, else
     the latest finished session), from each stock's state at 15:00."""
     from stock_predictor.models.nextday import next_trading_day
@@ -449,7 +538,8 @@ def _summarise_next(model, card, cfg, version, params, found, views, session, at
                         found[1] if found else None, min_chance, top, live=session == today,
                         next_session={"date": nd.isoformat(), "known": known,
                                       "partial": as_of < state_point,
-                                      "widest_range": [{"symbol": sym, "range_pct": rng} for rng, sym in widest]})
+                                      "widest_range": [{"symbol": sym, "range_pct": rng} for rng, sym in widest]},
+                        min_edge=min_edge)
     return out
 
 
@@ -463,4 +553,6 @@ def pick_rows(s: dict[str, Any], made_at: Optional[int] = None) -> list[dict]:
         "base_session": s["session"], "as_of": s["as_of"], "symbol": r["symbol"], "rank": r["rank"],
         "price": r["price"], "chance": r["chance"], "p_model": r["p_model"], "gain_p25": r["p25"],
         "gain_p50": r["p50"], "gain_p75": r["p75"], "passed": int(r["passed"]),
+        "stop_pct": s.get("stop_pct"), "base_rate": (s.get("edge") or {}).get("base"),
+        "flagged": int(bool(r.get("flagged"))),
     } for r in s["all"]]

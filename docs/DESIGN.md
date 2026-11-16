@@ -104,7 +104,19 @@ answer for each symbol is:
   came true on sessions the mapping was fitted without;
 - **a band**: p25 / p50 / p75 of either the return at the end of the window,
   or the best gain available in it (the highest later price against the price
-  now).
+  now);
+- **an edge**: the chance minus the base rate, which is how often any stock
+  reached the target from the same time of day in the held-out month,
+  interpolated between the 15-minute checks. For the next session it is the
+  month's rate. The held-out check records how stocks did in each 5-point
+  band of edge, and `today.sh` flags stocks at +10 or more alongside that
+  band's record. A raw chance near the base rate is not a signal: from 10:30,
+  more than half of these stocks touch +0.5% anyway.
+
+The stop also works with a window to the close: "+0.5% before -0.5%, by the
+close" (`train --target 0.5 --stop 0.5 --to-close`, `today.sh --stop 0.5`).
+That is the question a trade with a stop-loss asks. Touching +0.5% alone says
+nothing about the fall before or after it.
 
 This is what `predict`, `summary`, `scripts/today.sh` and the dashboard show:
 for example, "which stocks are expected to gain 0.5% or more before today's

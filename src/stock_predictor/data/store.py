@@ -101,6 +101,13 @@ _MIGRATIONS: list[str] = [
     );
     CREATE INDEX summary_pick_session ON summary_pick (session_date, kind);
     """,
+    # 5: a pick's stop (the target must come before it), the base rate it was
+    # compared with, and whether it was flagged as clearly above that
+    """
+    ALTER TABLE summary_pick ADD COLUMN stop_pct REAL;
+    ALTER TABLE summary_pick ADD COLUMN base_rate REAL;
+    ALTER TABLE summary_pick ADD COLUMN flagged INTEGER;
+    """,
 ]
 
 
@@ -234,7 +241,7 @@ class Store:
 
     SUMMARY_PICK_COLUMNS = ("made_at", "kind", "model_version", "target_pct", "session_date",
                             "base_session", "as_of", "symbol", "rank", "price", "chance", "p_model",
-                            "gain_p25", "gain_p50", "gain_p75", "passed")
+                            "gain_p25", "gain_p50", "gain_p75", "passed", "stop_pct", "base_rate", "flagged")
 
     def save_summary_picks(self, rows: list[dict]) -> int:
         """Record a summary's predictions; a rerun for the same minute is
