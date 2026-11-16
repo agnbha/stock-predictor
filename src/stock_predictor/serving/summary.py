@@ -142,12 +142,18 @@ def build_summary(rows, cfg: TripleBarrierConfig, version: str, card, session: s
     """Everything the summary says, as plain data (``--json`` writes it)."""
     now = now or int(time.time())
     target = cfg.target_pct
-    passed = rows[rows["chance"] >= min_chance].reset_index(drop=True)
+    as_of_time = NSE.time_of(as_of).strftime("%H:%M")
+    base = base_rate_at(evaluation, as_of_time, bool(next_session))
+    # Listed: the minimum chance met, or flagged. A stop makes every chance
+    # smaller, so a flagged stock can be below a 50% cut.
+    keep = rows["chance"] >= min_chance
+    n_passed = int(keep.sum())
+    if base is not None:
+        keep = keep | (((rows["chance"] - base) * 100).round(6) >= min_edge)
+    passed = rows[keep].reset_index(drop=True)
     head, rest = passed.head(top), passed.iloc[top:]
 
     record = (evaluation or {}).get("by_symbol") or {}
-    as_of_time = NSE.time_of(as_of).strftime("%H:%M")
-    base = base_rate_at(evaluation, as_of_time, bool(next_session))
 
     def edge_of(r) -> Optional[float]:
         return round((float(r["chance"]) - base) * 100, 6) if base is not None else None
@@ -195,7 +201,7 @@ def build_summary(rows, cfg: TripleBarrierConfig, version: str, card, session: s
         "minute_step": getattr(card, "minute_step", 1),
         "train_sessions": card.train_sessions, "calibrated": bool(rows["p_seen"].notna().any()),
         "entry_margin_pct": entry_margin_pct,
-        "min_chance": min_chance, "universe": int(len(rows)), "passed": int(len(passed)),
+        "min_chance": min_chance, "universe": int(len(rows)), "passed": n_passed, "listed": int(len(passed)),
         "top": [row(r) for _, r in head.iterrows()],
         # every stock, in rank order, for recording (summary --record) and --json
         "all": every,

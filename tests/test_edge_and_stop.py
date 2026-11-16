@@ -128,6 +128,14 @@ def test_the_summary_says_what_a_stop_model_answers():
     assert "selling at +0.5%, at -0.5%, or else at the close" in text
     assert pick_rows(s, made_at=1)[0]["stop_pct"] == 0.5
 
+    # a stop makes every chance smaller: a flagged stock is listed even under the 50% cut
+    low = _rows().assign(chance=[0.45, 0.35, 0.3], p_seen=[0.45, 0.35, 0.3])
+    ev = {**EVAL, "by_point": [{"point": "10:30", "base_hit": 0.31}]}
+    s = build_summary(low, STOP, "m-stop", card, "2026-11-13", as_of=AT_1030, finished=AT_1030,
+                      latest_session="2026-11-12", evaluation=ev, now=AT_1030 + 60)
+    assert s["passed"] == 0 and [r["symbol"] for r in s["top"]] == ["A"]  # +14; B is +4
+    assert "0 of 3 stocks have a 50% or better chance" in format_summary(s) and "(none)" not in format_summary(s)
+
 
 def _candles(rows):
     day = date(2026, 11, 13)
