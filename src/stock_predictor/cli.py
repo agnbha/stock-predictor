@@ -103,9 +103,14 @@ def _target_cfg(args):
         raise SystemExit("--stop needs --target")
     if args.to_close and args.target is None:
         raise SystemExit("--to-close needs --target")
+    outcome = getattr(args, "outcome", "touch")
+    next_session = bool(getattr(args, "next_session", False))
+    if outcome != "touch" and not (args.to_close or next_session):
+        raise SystemExit(f"--outcome {outcome} needs --to-close or --next-session")
     return TripleBarrierConfig(
         horizon_minutes=args.horizon or 30, target_pct=args.target, stop_pct=args.stop,
-        to_close=args.to_close,
+        to_close=args.to_close or (next_session and outcome != "touch"), outcome=outcome,
+        count=args.count if outcome == "opportunities" else 1,
     )
 
 
@@ -220,17 +225,18 @@ def _train_next_session(args, cfg) -> int:
     from stock_predictor.models import ModelCard, ModelRegistry, backend_name, model_version_string, nextday
     from stock_predictor.models.triple_barrier import TripleBarrierConfig
 
-    cfg = TripleBarrierConfig(target_pct=cfg.target_pct, to_close=True)
+    cfg = TripleBarrierConfig(target_pct=cfg.target_pct, to_close=True, outcome=cfg.outcome, count=cfg.count)
     with AnalyzerViews() as views:
         sessions = _sessions(views, args, candles_only=True)
         if len(sessions) < 2:
             print("too few sessions", file=sys.stderr)
             return 1
-        print(f"target: +{cfg.target_pct:g}% from the next session's open, before its close")
+        print(f"target: {nextday.describe(cfg.target_pct, cfg.outcome, cfg.count)}")
         print(f"pairing {len(sessions)} sessions ({sessions[0]}..{sessions[-1]}): the state at 15:00 "
               "against the next session ...")
         source = _frame_source(views, args, sessions=sessions)
-        rows = nextday.next_session_set(views, source, sessions, cfg.target_pct, progress=_progress("session"))
+        rows = nextday.next_session_set(views, source, sessions, cfg.target_pct, progress=_progress("session"),
+                                        outcome=cfg.outcome, count=cfg.count)
         print(_frames_line(source))
     if rows.empty:
         print("no rows", file=sys.stderr)
@@ -238,7 +244,7 @@ def _train_next_session(args, cfg) -> int:
     names = nextday.feature_names(rows)
     print(f"fitting: {len(rows):,} symbol-sessions x {len(names)} features, backend={backend_name()}, "
           f"target hit on {rows['label_class'].mean():.1%} of them")
-    model, table = nextday.fit(rows, names, args.calibrate)
+    model, table = nextday.fit(rows, names, args.calibrate, outcome=cfg.outcome)
     if table:
         for r in table:
             print(f"  P {r['band']}: predicted {r['predicted']:.1%}, came true {r['seen']:.1%} ({r['rows']} rows)")
@@ -250,7 +256,7 @@ def _train_next_session(args, cfg) -> int:
         model_version=version, backend=backend_name(), trained_through=sessions[-1],
         train_sessions=int(rows["session_date"].nunique()), feature_names=names,
         params=get_params().to_dict(), minute_step=1, target=asdict(cfg), calibration=table,
-        band="max_gain_pct", trained_from=str(rows["session_date"].min()), recent_days=recent,
+        band=model.band, trained_from=str(rows["session_date"].min()), recent_days=recent,
         train_rows=len(rows), entry=nextday.ENTRY,
     )
     path = ModelRegistry().save(version, model, card)
@@ -562,11 +568,12 @@ def _evaluate_next_session(args, version, model, card, cfg) -> int:
         i = every.index(sessions[0])
         paired = every[max(0, i - 1):i] + sessions  # the session before the first, for its state
         source = _frame_source(views, args, _card_params(card), sessions=paired)
-        rows = nextday.next_session_set(views, source, paired, cfg.target_pct)
-        rep = nextday.evaluate_next_session(model, rows, cfg.target_pct, args.n, views)
+        rows = nextday.next_session_set(views, source, paired, cfg.target_pct, outcome=cfg.outcome, count=cfg.count)
+        rep = nextday.evaluate_next_session(model, rows, cfg.target_pct, args.n, views,
+                                            outcome=cfg.outcome, count=cfg.count)
         print(_frames_line(source))
     s = rep.summary
-    print(f"\n{version}: +{cfg.target_pct:g}% from the next session's open; top {rep.n} each session over "
+    print(f"\n{version}: {nextday.describe(cfg.target_pct, cfg.outcome, cfg.count)}; top {rep.n} each session over "
           f"{len(rep.sessions)} sessions ({rep.sessions[0]}..{rep.sessions[-1]}); costs {rep.cost_pct:.3f}%")
     print(f"  every stock            hit {s['base_hit']:.1%}  net {s['base_net']:+.3f}%")
     for k, label in (("model", "the model's top 5"), ("intraday_volatility", "widest range before"),
@@ -886,6 +893,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="with --target: the target must come before -PCT%%")
     tr.add_argument("--to-close", action="store_true",
                     help="with --target: the window is the rest of the session (--horizon unused)")
+    tr.add_argument("--outcome", choices=["touch", "close", "opportunities"], default="touch",
+                    help="with --to-close or --next-session: what reaching the target means: the high "
+                         "touches it (default); the close is that far above the entry (for --next-session, "
+                         "above the previous close); or --count separate opportunities of that size")
+    tr.add_argument("--count", type=int, default=2, metavar="N",
+                    help="with --outcome opportunities: how many (default 2)")
     tr.add_argument("--band", choices=["return", "max-gain"], default="return",
                     help="what the p25/p50/p75 band predicts: the return at the end of the window "
                          "(default), or the best gain available in it")

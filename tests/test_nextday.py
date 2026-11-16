@@ -53,6 +53,7 @@ def test_outcomes_are_measured_from_the_open():
     out = session_outcomes(views, "2026-11-11", 0.5).set_index("symbol").loc["A"]
     assert out["open"] == 100 and out["label_class"] == 1
     assert out["max_gain_pct"] == pytest.approx(0.6) and out["close_return_pct"] == pytest.approx(-1.5)
+    assert out["session_close"] == 98.5 and out["opportunities"] == 0  # 3 minutes: no 5-minute hold
     frame = pd.DataFrame({"symbol": ["A", "A", "B"], "ts_epoch": [1, 3, 2], "x": [1, 2, 3]})
     assert state_at(frame, 2).set_index("symbol")["x"].to_dict() == {"A": 1, "B": 3}
 

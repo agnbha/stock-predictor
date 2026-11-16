@@ -111,6 +111,23 @@ for example, "which stocks are expected to gain 0.5% or more before today's
 close, and by how much". Its ground truth is the candles themselves, so it
 needs no detector, and every finished session can be used.
 
+Before the close, "reaching X%" can mean three things (`train --outcome`):
+
+- **touch** (the default): the price trades X% above the price now;
+- **close**: the session closes X% or more above the price now;
+- **opportunities**: the rest of the session holds at least N separate X%
+  opportunities. An opportunity is what stock-analyzer's detector marks: buy
+  at a candle's low, sell at the high of a candle at least 5 minutes later.
+  The next one buys after that sale. The count is the most such round trips
+  the session allowed, so it assumes perfect timing. A steady 1.2% rise
+  counts as two 0.6% opportunities, because it could have been traded twice.
+
+All three use the same features, frames and evaluation. The band follows the
+outcome: the return to the close for **close**, the best gain otherwise. In
+an evaluation, "net" for **close** and **opportunities** is buying at the
+price now and holding to the close. The opportunities themselves cannot be
+traded without hindsight.
+
 ### 1.3 The next session
 
 The same question about a session that has not opened: will the stock trade
@@ -119,6 +136,10 @@ can buy at, through the pre-open auction; an overnight gap is not counted as a
 gain. The model has one row per (symbol, session): the stock's full state at
 15:00 the session before (the same 84 features), against the next session's
 high, open and close. `scripts/tomorrow.sh` shows it.
+
+The other outcomes apply here too. **close** compares the next session's close
+with **this** session's close, its last price, so an overnight gap counts.
+**opportunities** counts them over the whole next session from the open.
 
 ### 1.4 Every answer is recorded and scored
 

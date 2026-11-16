@@ -24,12 +24,17 @@ def model_version_string(backend: str, trained_through: str, target=None, minute
     itself so models for different targets do not overwrite each other. A
     training window of only the last ``recent_days`` and a minute step other
     than 1 are named too, so they sit beside the full-history model."""
+    outcome = getattr(target, "outcome", "touch")
+    kind = {"close": "-at-close", "opportunities": f"-{getattr(target, 'count', 1)}x"}.get(outcome, "")
     if next_session and target is not None and target.fixed:
-        label = f"nextday-{target.target_pct:g}pct"
+        label = f"nextday-{target.target_pct:g}pct{kind}"
     elif target is not None and target.fixed:
         stop = f"-stop{target.stop_pct:g}pct" if target.stop_pct is not None else ""
         window = "close" if target.to_close else f"{target.horizon_minutes}m"
-        label = f"target-{target.target_pct:g}pct{stop}-{window}"
+        if outcome == "close":
+            label = f"target-{target.target_pct:g}pct-at-close"
+        else:
+            label = f"target-{target.target_pct:g}pct{stop}-{window}{kind}"
     elif target is not None and target.horizon_minutes != 30:
         label = f"triple-barrier-{target.horizon_minutes}m"
     else:
@@ -67,6 +72,14 @@ class ModelCard:
     # Where a prediction's gain is measured from: each minute's close
     # ("minute"), or the next session's open ("next_open", models/nextday.py).
     entry: str = "minute"
+
+    def __post_init__(self) -> None:
+        # Every field of the target, so a card saved before a field existed
+        # compares equal to one saved after (its default is what it meant).
+        if self.target:
+            from stock_predictor.models.triple_barrier import TripleBarrierConfig
+
+            self.target = asdict(TripleBarrierConfig(**self.target))
 
     def recipe(self) -> dict[str, Any]:
         """What makes two models the same kind of model: a result kept beside
@@ -140,6 +153,7 @@ class ModelRegistry:
         the latest session; of those, the one saved last."""
         found = [c for c in self.cards()
                  if bool(c.target and c.target.get("target_pct") is not None) == fixed
+                 and c.target.get("outcome", "touch") == "touch"
                  and not c.recent_days and c.entry == "minute"]
         if not found:
             return None

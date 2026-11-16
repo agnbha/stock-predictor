@@ -33,6 +33,11 @@ from stock_predictor.models.registry import ModelRegistry, card_target
 from stock_predictor.models.triple_barrier import TripleBarrierConfig
 
 
+# How far below the sale price an entry has to be: about the target plus a round
+# trip's costs (0.5% + 0.08%), rounded up.
+ENTRY_MARGIN_PCT = 0.6
+
+
 class SummaryUnavailable(RuntimeError):
     """Nothing to summarise yet: no model for the target, or no candles."""
 
@@ -103,7 +108,8 @@ def build_summary(rows, cfg: TripleBarrierConfig, version: str, card, session: s
                   finished: Optional[int], latest_session: Optional[str], evaluation: Optional[dict],
                   min_chance: float = 0.5, top: int = 15, now: Optional[int] = None,
                   capped: bool = False, live: bool = True,
-                  next_session: Optional[dict] = None) -> dict[str, Any]:
+                  next_session: Optional[dict] = None,
+                  entry_margin_pct: float = ENTRY_MARGIN_PCT) -> dict[str, Any]:
     """Everything the summary says, as plain data (``--json`` writes it)."""
     now = now or int(time.time())
     target = cfg.target_pct
@@ -113,13 +119,18 @@ def build_summary(rows, cfg: TripleBarrierConfig, version: str, card, session: s
     record = (evaluation or {}).get("by_symbol") or {}
 
     def row(r) -> dict:
-        return {"symbol": r["symbol"], "price": float(r["price"]), "chance": float(r["chance"]),
+        price = float(r["price"])
+        # the same range as prices: the price shown, raised by the p25 and p75 gains
+        low, high = price * (1 + float(r["p25"]) / 100), price * (1 + float(r["p75"]) / 100)
+        # Where to buy: the margin below the low end of the range, so that even a sale there
+        # clears it; the price now when it is already that far below the range.
+        entry = min(price, low * (1 - entry_margin_pct / 100))
+        return {"symbol": r["symbol"], "price": price, "chance": float(r["chance"]),
                 "track": record.get(r["symbol"]),
                 "p_model": float(r["p_model"]), "median_gain_pct": float(r["p50"]),
-                "range_pct": [float(r["p25"]), float(r["p75"])],
-                # the same range as prices: the price shown, raised by the p25 and p75 gains
-                "range_price": [float(r["price"] * (1 + r["p25"] / 100)), float(r["price"] * (1 + r["p75"] / 100))],
-                "target_price": float(r["price"] * (1 + target / 100)), "vol_rank": int(r["vol_rank"])}
+                "range_pct": [float(r["p25"]), float(r["p75"])], "range_price": [low, high],
+                "entry_price": entry, "entry_vs_price_pct": (entry / price - 1) * 100 if price else 0.0,
+                "target_price": float(price * (1 + target / 100)), "vol_rank": int(r["vol_rank"])}
 
     groups = []
     if len(rest):
@@ -139,6 +150,7 @@ def build_summary(rows, cfg: TripleBarrierConfig, version: str, card, session: s
         "recent_days": getattr(card, "recent_days", None),
         "minute_step": getattr(card, "minute_step", 1),
         "train_sessions": card.train_sessions, "calibrated": bool(rows["p_seen"].notna().any()),
+        "entry_margin_pct": entry_margin_pct,
         "min_chance": min_chance, "universe": int(len(rows)), "passed": int(len(passed)),
         "top": [row(r) for _, r in head.iterrows()],
         # every stock, in rank order, for recording (summary --record) and --json
@@ -223,6 +235,7 @@ def format_summary(s: dict[str, Any], width: int = 100) -> str:
         "Expected gain: the best price later today against now (median, and the p25-p75 range), "
         "before costs. Where it closes can be lower.",
         "Range in price: the same p25-p75 range as prices, the best price expected later today.",
+        *_entry_note(s),
         "",
     ]
     lines += _table(s, "Price")
@@ -236,21 +249,31 @@ def _track(t: Optional[dict]) -> str:
     return f"{t['yes_reached']:>3}/{t['said_yes']:<3} {t['right'] / t['checks'] * 100:>3.0f}%" if t["checks"] else ""
 
 
+def _entry_note(s: dict[str, Any]) -> list[str]:
+    m = s.get("entry_margin_pct", ENTRY_MARGIN_PCT)
+    return [f"Entry price: the most to pay. It is {m:g}% below the low end of the Range in price, so even a sale "
+            f"there clears {m:g}%. When the price now is already that far below, it is the price now. A buy limit "
+            "below the price now may never fill, and the chance is for buying at the price now."]
+
+
 def _table(s: dict[str, Any], price_label: str) -> list[str]:
     if not s["top"]:
         return ["  (none)"]
     tr = s.get("track_record")
     money = [f"{a:.2f} to {b:.2f}" for a, b in (r["range_price"] for r in s["top"])]
     mw = max(len("Range in price"), *map(len, money))
+    buy = [f"{r['entry_price']:.2f} (now)" if r["entry_price"] >= r["price"]
+           else f"{r['entry_price']:.2f} ({r['entry_vs_price_pct']:+.1f}%)" for r in s["top"]]
+    bw = max(len("Entry price"), *map(len, buy))
     head = (f"  {'#':>2}  {'Stock':<12} {price_label:>10}  {'Chance':>6}  {'Median':>7}   {'Range':<17}"
-            f"  {'Range in price':<{mw}}")
+            f"  {'Range in price':<{mw}}  {'Entry price':<{bw}}")
     if tr:
         head += "  Last month"
     out = [head]
     for i, r in enumerate(s["top"], start=1):
         lo, hi = r["range_pct"]
         line = (f"  {i:>2}  {r['symbol']:<12} {r['price']:>10.2f}  {_pct(r['chance']):>6}  "
-                f"{r['median_gain_pct']:>+6.2f}%   {f'{lo:+.2f} to {hi:+.2f}%':<17}  {money[i - 1]:<{mw}}")
+                f"{r['median_gain_pct']:>+6.2f}%   {f'{lo:+.2f} to {hi:+.2f}%':<17}  {money[i - 1]:<{mw}}  {buy[i - 1]:<{bw}}")
         if tr:
             line += "  " + _track(r.get("track"))
         out.append(line)
@@ -280,6 +303,7 @@ def _format_next(s: dict[str, Any], width: int) -> str:
         "before costs. An overnight gap is not counted; the price column is the latest one.",
         "Range in price: the same p25-p75 range as prices, worked from the latest price "
         "(the open is not known yet, so it moves with wherever the stock opens).",
+        *_entry_note(s),
         "",
     ]
     lines += _table(s, "Price now")

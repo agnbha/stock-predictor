@@ -136,7 +136,10 @@ def evaluate_target(
     rows["intraday_volatility"] = rows["atr_14"] / rows["_close"].replace(0, np.nan)
     rows["hit"] = rows["label_class"] > 0
     rows["stopped"] = rows["label_class"] < 0
-    rows["net"] = trade_net_pct(rows["label_class"], rows["forward_return_pct"], cfg, cost)
+    if getattr(cfg, "outcome", "touch") == "touch":
+        rows["net"] = trade_net_pct(rows["label_class"], rows["forward_return_pct"], cfg, cost)
+    else:  # bought at the row's close and held to the close (opportunities need hindsight on timing)
+        rows["net"] = rows["forward_return_pct"] - cost
     used = sorted(rows["session_date"].unique())
     calm = {sd: {p.symbol for p in highest_volatility(source.views, sd, 0, n)} for sd in used}
 
@@ -181,11 +184,10 @@ def evaluate_target(
 
     points_seen = rows.groupby(["session_date", "point"]).ngroups
     filters = []
-    for rule, keep in (
-        (f"chance >= 50% (model's P)", rows["p"] >= 0.5),
-        (f"chance >= 50% (calibrated)", rows["p_seen"] >= 0.5),
-        (f"band median >= +{cfg.target_pct:g}%", rows["band_p50"] >= cfg.target_pct),
-    ):
+    rules = [("chance >= 50% (model's P)", rows["p"] >= 0.5), ("chance >= 50% (calibrated)", rows["p_seen"] >= 0.5)]
+    if getattr(cfg, "outcome", "touch") != "opportunities":  # there the band is not what the target counts
+        rules.append((f"band median >= +{cfg.target_pct:g}%", rows["band_p50"] >= cfg.target_pct))
+    for rule, keep in rules:
         k = rows[keep.fillna(False).to_numpy(dtype=bool)]
         if len(k):
             filters.append({"rule": rule, "rows": int(len(k)), "per_session_point": len(k) / points_seen,
