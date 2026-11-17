@@ -251,6 +251,7 @@ class NextSessionReport:
     filters: list[dict]
     by_symbol: Optional[dict] = None
     target_text: Optional[str] = None
+    by_edge: Optional[list] = None  # how stocks did by chance minus the base rate (eval.target.by_edge)
 
     def to_dict(self) -> dict:
         return {
@@ -259,6 +260,7 @@ class NextSessionReport:
             "session_count": len(self.sessions), "top_n": self.n, "cost_pct": self.cost_pct,
             "summary": self.summary, "calibration": self.calibration,
             "band_coverage": self.band_coverage, "filters": self.filters, "by_symbol": self.by_symbol,
+            "by_edge": self.by_edge,
             # one "point": the open, so readers of per-point results find it
             "by_point": [{"point": "09:15", "base_hit": self.summary["base_hit"],
                           "model_hit": self.summary["model"]["hit"],
@@ -322,9 +324,10 @@ def evaluate_next_session(model, rows, target_pct: float, n: int = 5, views=None
         if len(k):
             filters.append({"rule": rule, "rows": int(len(k)), "per_session_point": len(k) / per_session,
                             "hit": float(k["hit"].mean()), "net": float(k["net"].mean())})
-    from stock_predictor.eval.target import by_symbol_record
+    from stock_predictor.eval.target import by_edge, by_symbol_record
 
     sessions = sorted(rows["session_date"].unique())
     rows["chance"] = rows["p_seen"].fillna(rows["p"])
+    rows["base"] = rows["hit"].mean()  # one base rate: tomorrow.sh compares with the month's
     return NextSessionReport(target_pct, sessions, n, cost, summary, calibration, coverage, filters,
-                             by_symbol_record(rows), describe(target_pct, outcome, count))
+                             by_symbol_record(rows), describe(target_pct, outcome, count), by_edge(rows))

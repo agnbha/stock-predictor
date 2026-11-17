@@ -30,6 +30,35 @@ from stock_predictor.models.triple_barrier import TripleBarrierConfig
 
 STRATEGIES = ("model", "intraday_volatility", "highest_volatility")
 CALIBRATION_EDGES = (0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 1.0)
+# Edge: a stock's chance minus the base rate (every stock's hit rate) at the
+# same point, in percentage points. Buckets for the held-out record.
+EDGE_EDGES = (-100, 0, 5, 10, 15, 20, 100)
+
+
+def by_edge(rows, chance_col: str = "chance", base_col: str = "base") -> list[dict]:
+    """How stocks did, by how far their chance sat above the base rate for
+    their point: rows, how often they reached the target, the base rate
+    for the same rows, and the net of a trade."""
+    edge = ((rows[chance_col] - rows[base_col]) * 100).round(6)  # so +10 is 10, not 9.9999...
+    out = []
+    for lo, hi in zip(EDGE_EDGES, EDGE_EDGES[1:]):
+        m = ((edge >= lo) & (edge < hi)).to_numpy()
+        if m.any():
+            g = rows[m]
+            out.append({"from": lo, "to": hi, "rows": int(m.sum()), "hit": float(g["hit"].mean()),
+                        "base": float(g[base_col].mean()), "net": float(g["net"].mean())})
+    return out
+
+
+def edge_record(evaluation: Optional[dict], min_edge: float) -> Optional[dict]:
+    """The held-out record of every bucket from ``min_edge`` points up, pooled."""
+    buckets = [b for b in (evaluation or {}).get("by_edge") or [] if b["from"] >= min_edge]
+    n = sum(b["rows"] for b in buckets)
+    if not n:
+        return None
+    return {"rows": n, "hit": sum(b["hit"] * b["rows"] for b in buckets) / n,
+            "base": sum(b["base"] * b["rows"] for b in buckets) / n,
+            "net": sum(b["net"] * b["rows"] for b in buckets) / n}
 
 
 def by_symbol_record(rows, chance_col: str = "chance") -> dict[str, dict]:
@@ -81,13 +110,14 @@ class TargetReport:
     band_coverage: Optional[dict] = None  # share of outcomes at or below the predicted p25/p50/p75
     filters: list = ()                    # "keep the symbols that ..." rules and how they did
     by_symbol: Optional[dict] = None      # each stock's track record (by_symbol_record)
+    by_edge: Optional[list] = None        # how stocks did by chance minus the base rate (by_edge)
 
     def to_dict(self) -> dict:
         return {
             "target": self.cfg.describe(), "sessions": [self.sessions[0], self.sessions[-1]],
             "session_count": len(self.sessions), "top_n": self.n, "cost_pct": self.cost_pct,
             "summary": self.summary, "band_coverage": self.band_coverage, "filters": list(self.filters),
-            "by_symbol": self.by_symbol,
+            "by_symbol": self.by_symbol, "by_edge": self.by_edge,
         }
 
 
@@ -193,5 +223,6 @@ def evaluate_target(
             filters.append({"rule": rule, "rows": int(len(k)), "per_session_point": len(k) / points_seen,
                             "hit": float(k["hit"].mean()), "net": float(k["net"].mean())})
     rows["chance"] = rows["p_seen"].fillna(rows["p"])
+    rows["base"] = rows.groupby("point")["hit"].transform("mean")  # every stock's hit rate at the point
     return TargetReport(cfg, used, n, cost, by_point, calibration, summary, coverage, filters,
-                        by_symbol_record(rows))
+                        by_symbol_record(rows), by_edge(rows))

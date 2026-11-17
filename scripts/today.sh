@@ -5,6 +5,10 @@
 #   scripts/today.sh                   the summary, from the latest finished candle
 #   scripts/today.sh --target 1        a different gain (trains a model for it if needed)
 #   scripts/today.sh --min-chance 60   a stricter filter (default 50)
+#   scripts/today.sh --stop 0.5        +0.5% before it falls 0.5% (by the close), from a model trained on
+#                                      that question (trains one if needed; today's session only)
+#   scripts/today.sh --min-edge 15     flag stocks whose chance is 15+ points above what any stock gets
+#                                      at this time of day (default 10)
 #   scripts/today.sh --top 20          list more stocks in full (default 15)
 #   scripts/today.sh --at 11:00        as of an earlier minute today
 #   scripts/today.sh --session 2026-11-09 --at 10:30    a past day
@@ -32,6 +36,7 @@ if [ ! -x "$sp" ] || [ ! -x "$py" ]; then
 fi
 
 target=0.5
+stop=""
 tomorrow=0
 train_only=0
 record=1
@@ -41,6 +46,7 @@ pass=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --target)     target="$2"; pass+=(--target "$2"); shift 2 ;;
+    --stop)       stop="$2"; pass+=(--stop "$2"); shift 2 ;;
     --retrain)    retrain=yes; shift ;;
     --no-retrain) retrain=no; shift ;;
     --evaluate)   evaluate=1; shift ;;
@@ -52,6 +58,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$target" in ''|*[!0-9.]*) echo "today.sh: --target must be a number, e.g. 0.5" >&2; exit 2 ;; esac
+case "$stop" in *[!0-9.]*) echo "today.sh: --stop must be a number, e.g. 0.5" >&2; exit 2 ;; esac
+if [ -n "$stop" ] && [ "$tomorrow" = 1 ]; then
+  echo "today.sh: --stop is for today's session only, not --tomorrow" >&2; exit 2
+fi
 
 if [ "$tomorrow" = 1 ]; then
   # One row per stock and session: the state at 15:00 against the session after.
@@ -61,8 +71,11 @@ if [ "$tomorrow" = 1 ]; then
 else
   # Every finished session stock-analyzer has, every minute of each.
   train=(train --target "$target" --to-close --band max-gain --minute-step 1)
+  [ -n "$stop" ] && train+=(--stop "$stop")
   is_next=False
 fi
+stop_py="${stop:-None}"
+what="+$target% before the close${stop:+, before -$stop%}"
 say() { printf '%s\n' "$*" >&2; }
 
 if [ "$evaluate" = 1 ]; then
@@ -75,10 +88,10 @@ if [ "$evaluate" = 1 ]; then
   say "  recorded beside $held"
 fi
 
-state="$("$py" -c "from stock_predictor.serving.summary import model_state; print(model_state($target, next_session=$is_next))")"
+state="$("$py" -c "from stock_predictor.serving.summary import model_state; print(model_state($target, next_session=$is_next, stop_pct=$stop_py))")"
 if [ "$retrain" = yes ] || { [ "$retrain" = auto ] && [ "$state" != ok ]; }; then
   case "$state" in
-    missing) say "No model for +$target% before the close yet: training one on every finished session ..." ;;
+    missing) say "No model for $what yet: training one on every finished session ..." ;;
     stale)   say "A session has finished since the model was trained: retraining ..." ;;
     *)       say "Retraining on every finished session ..." ;;
   esac

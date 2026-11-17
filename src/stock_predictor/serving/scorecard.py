@@ -33,7 +33,9 @@ def _candles_by_symbol(views, session: str) -> dict[str, list]:
 
 
 def score_pick(pick: dict, candles: list) -> Optional[dict]:
-    """The outcome of one recorded pick, or None with no candles to judge by."""
+    """The outcome of one recorded pick, or None with no candles to judge by.
+    With a stop, it hit only if the target came first: a candle reaching both
+    counts as stopped, as in training."""
     if pick["kind"] == "next":
         after = candles
         entry = candles[0].open if candles else None
@@ -43,9 +45,18 @@ def score_pick(pick: dict, candles: list) -> Optional[dict]:
     if not after or not entry or entry <= 0:
         return None
     best = max(max(c.high for c in after) / entry - 1.0, 0.0) * 100.0
+    hit = best >= pick["target_pct"] - 1e-9
+    stop = pick.get("stop_pct")
+    if stop and hit:
+        up, dn = entry * (1 + pick["target_pct"] / 100.0), entry * (1 - stop / 100.0)
+        for c in after:
+            if c.low <= dn:
+                hit = False
+                break
+            if c.high >= up:
+                break
     return {"id": pick.get("id"), "entry_price": float(entry), "best_gain_pct": best,
-            "close_return_pct": (after[-1].close / entry - 1.0) * 100.0,
-            "hit": int(best >= pick["target_pct"] - 1e-9)}
+            "close_return_pct": (after[-1].close / entry - 1.0) * 100.0, "hit": int(hit)}
 
 
 def scorecard(views, store, session: str, now: Optional[int] = None, persist: bool = True) -> dict[str, Any]:
@@ -74,6 +85,7 @@ def scorecard(views, store, session: str, now: Optional[int] = None, persist: bo
             continue
         t = rows[0]["target_pct"]
         passed = [r for r in scored if r["passed"]]
+        flagged = [r for r in scored if r.get("flagged")]
         top5 = sorted(scored, key=lambda r: r["rank"])[:5]
 
         def rate(rs):
@@ -82,7 +94,10 @@ def scorecard(views, store, session: str, now: Optional[int] = None, persist: bo
         report["runs"].append({
             "kind": kind, "model_version": version, "as_of": as_of,
             "as_of_time": NSE.time_of(as_of).strftime("%H:%M"),
-            "base_session": rows[0]["base_session"], "target_pct": t,
+            "base_session": rows[0]["base_session"], "target_pct": t, "stop_pct": rows[0].get("stop_pct"),
+            "base_rate": rows[0].get("base_rate"),
+            "flagged": len(flagged), "flagged_hits": sum(r["hit"] for r in flagged),
+            "flagged_symbols": [(r["symbol"], bool(r["hit"])) for r in sorted(flagged, key=lambda r: r["rank"])],
             "made_at": min(r["made_at"] for r in rows),
             "stocks": len(scored), "every_stock_hit": rate(scored),
             "passed": len(passed), "passed_hits": sum(r["hit"] for r in passed), "passed_hit": rate(passed),
@@ -153,8 +168,17 @@ def format_scorecard(r: dict[str, Any]) -> str:
             head = (f"  tomorrow.sh on {run['base_session']} (state at {run['as_of_time']}): "
                     f"+{t:g}% above {s}'s open")
         else:
-            head = f"  today.sh at {run['as_of_time']}: +{t:g}% above the price then"
+            stop = f" before -{run['stop_pct']:g}%" if run.get("stop_pct") else ""
+            head = f"  today.sh at {run['as_of_time']}: +{t:g}% above the price then{stop}"
         lines.append(head + f" · {run['model_version']}")
+        if run.get("base_rate") is not None:
+            base = _pct(run["base_rate"])
+            if run["flagged"]:
+                names = ", ".join(f"{sym} {'✓' if hit else '✗'}" for sym, hit in run["flagged_symbols"][:10])
+                lines.append(f"    Flagged as clearly above the base rate ({base}): {run['flagged']}, "
+                             f"{run['flagged_hits']} reached it ({_pct(run['flagged_hits'] / run['flagged'])}) · {names}")
+            else:
+                lines.append(f"    No stock was flagged as clearly above the base rate ({base}).")
         if run["passed"]:
             lines.append(
                 f"    {run['passed']} picks with a chance of 50%+ (said {_pct(run['passed_chance'])} on average): "
