@@ -1,5 +1,6 @@
-# Two SQLite files read in place, as stock-analyzer's own dashboards do: no exporter, no second copy.
-# run-local.sh rewrites the two paths below to the real files.
+# The Stock Predictor datasources, added to stock-analyzer's Grafana by grafana/add-to-stock-analyzer.sh,
+# which fills in the two paths. Two SQLite files read in place, as stock-analyzer's own dashboards do.
+# Neither is the default: stock-analyzer's own datasource is, and Grafana allows one.
 apiVersion: 1
 
 datasources:
@@ -8,7 +9,7 @@ datasources:
     uid: stock-predictor-sqlite
     type: frser-sqlite-datasource
     access: proxy
-    isDefault: true
+    isDefault: false
     jsonData:
       path: __STOCK_PREDICTOR_DB__
       # today.sh writes this file while the dashboards read it; wait out its brief locks.
@@ -16,9 +17,10 @@ datasources:
       pathPrefix: "file:"
       pathOptions: "_pragma=busy_timeout(10000)&_pragma=query_only(1)"
 
-  # stock-analyzer's database, for the actual minute candles. Opened read-write only so SQLite can
-  # create its WAL index when no stock-analyzer process has it open (a strictly read-only open then
-  # fails); query_only refuses every write, as stock-predictor's own connection does.
+  # stock-analyzer's database, for the actual minute candles, read without writing. Separate from
+  # stock-analyzer's own datasource (which its dashboards use read-write) so that every Stock Predictor
+  # panel is query_only. Opened read-write only so SQLite can create its WAL index when no
+  # stock-analyzer process has the file open (a strictly read-only open then fails).
   - name: StockAnalyzer (read-only)
     uid: stock-analyzer-readonly
     type: frser-sqlite-datasource
