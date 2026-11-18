@@ -1107,7 +1107,7 @@
     "type": "frser-sqlite-datasource",
     "uid": "stock-analyzer-readonly"
    },
-   "description": "stock-analyzer's one-minute candles for the same time range, read without writing to its database; the candle still forming is left out. Compare with the predicted range on the left: did the price get there? Green markers: runs where the stock was flagged.",
+   "description": "stock-analyzer's one-minute candles for the same time range, read without writing to its database; the candle still forming is left out. Compare with the predicted range on the left: did the price get there? Green markers: runs where the stock was flagged.\n\nThe tooltip, as on stock-analyzer's Candles and Calls: Open, Close, High, Low, Volume, then\n- **EMA 10m / 60m** (yellow, blue): exponential moving averages of the minute closes, weighted 2/(N+1) (N = 10, 60). Each restarts with its session's first close and appears once N minutes have passed. (Candles and Calls draws simple averages, SMA.)\n- **Previous day's close** (dotted): the close of the session before, the price the day's move is measured from (stock-analyzer's daily candle).",
    "targets": [
     {
      "datasource": {
@@ -1115,8 +1115,8 @@
       "uid": "stock-analyzer-readonly"
      },
      "refId": "A",
-     "queryText": "SELECT ts_epoch AS time, open, high, low, close, volume\nFROM v_intraday_merged\nWHERE symbol = '${symbol}' AND ts_epoch BETWEEN $__from / 1000 AND $__to / 1000\n  AND COALESCE(source, '') != 'forming'\nORDER BY ts_epoch",
-     "rawQueryText": "SELECT ts_epoch AS time, open, high, low, close, volume\nFROM v_intraday_merged\nWHERE symbol = '${symbol}' AND ts_epoch BETWEEN $__from / 1000 AND $__to / 1000\n  AND COALESCE(source, '') != 'forming'\nORDER BY ts_epoch",
+     "queryText": "-- Whole sessions, so each average starts at its session's open even when the time range starts later.\nWITH m AS MATERIALIZED (\n  SELECT ts_epoch, session_date, open, high, low, close, volume,\n         ROW_NUMBER() OVER (PARTITION BY session_date ORDER BY ts_epoch) AS n\n  FROM v_intraday_merged\n  WHERE symbol = '${symbol}' AND COALESCE(source, '') != 'forming'\n    AND session_date BETWEEN date($__from / 1000, 'unixepoch', '+5 hours', '+30 minutes') AND date($__to / 1000, 'unixepoch', '+5 hours', '+30 minutes')\n),\n-- EMA: the last value moved 2/(N+1) of the way to each new close, from the session's first close.\nema(session_date, n, e10, e60) AS (\n  SELECT session_date, n, close, close FROM m WHERE n = 1\n  UNION ALL\n  SELECT m.session_date, m.n, e.e10 + (2.0 / 11) * (m.close - e.e10), e.e60 + (2.0 / 61) * (m.close - e.e60)\n  FROM ema e JOIN m ON m.session_date = e.session_date AND m.n = e.n + 1\n),\nprev AS (\n  SELECT s.session_date,\n         (SELECT d.close FROM v_daily_candles d WHERE d.symbol = '${symbol}' AND d.session_date < s.session_date\n          ORDER BY d.session_date DESC LIMIT 1) AS close\n  FROM (SELECT DISTINCT session_date FROM m) s\n)\n-- The tooltip lists the series in this order.\nSELECT m.ts_epoch AS time,\n       m.open AS \"Open\", m.close AS \"Close\", m.high AS \"High\", m.low AS \"Low\", m.volume AS \"Volume\",\n       CASE WHEN m.n >= 10 THEN e.e10 END AS \"EMA 10m\",\n       CASE WHEN m.n >= 60 THEN e.e60 END AS \"EMA 60m\",\n       -- blank on each session's first candle but the first, so the line breaks between sessions\n       CASE WHEN m.n > 1 OR m.ts_epoch = (SELECT MIN(ts_epoch) FROM m WHERE ts_epoch >= $__from / 1000)\n            THEN p.close END AS \"Previous day's close\"\nFROM m JOIN ema e ON e.session_date = m.session_date AND e.n = m.n\nLEFT JOIN prev p ON p.session_date = m.session_date\nWHERE m.ts_epoch BETWEEN $__from / 1000 AND $__to / 1000\nORDER BY m.ts_epoch",
+     "rawQueryText": "-- Whole sessions, so each average starts at its session's open even when the time range starts later.\nWITH m AS MATERIALIZED (\n  SELECT ts_epoch, session_date, open, high, low, close, volume,\n         ROW_NUMBER() OVER (PARTITION BY session_date ORDER BY ts_epoch) AS n\n  FROM v_intraday_merged\n  WHERE symbol = '${symbol}' AND COALESCE(source, '') != 'forming'\n    AND session_date BETWEEN date($__from / 1000, 'unixepoch', '+5 hours', '+30 minutes') AND date($__to / 1000, 'unixepoch', '+5 hours', '+30 minutes')\n),\n-- EMA: the last value moved 2/(N+1) of the way to each new close, from the session's first close.\nema(session_date, n, e10, e60) AS (\n  SELECT session_date, n, close, close FROM m WHERE n = 1\n  UNION ALL\n  SELECT m.session_date, m.n, e.e10 + (2.0 / 11) * (m.close - e.e10), e.e60 + (2.0 / 61) * (m.close - e.e60)\n  FROM ema e JOIN m ON m.session_date = e.session_date AND m.n = e.n + 1\n),\nprev AS (\n  SELECT s.session_date,\n         (SELECT d.close FROM v_daily_candles d WHERE d.symbol = '${symbol}' AND d.session_date < s.session_date\n          ORDER BY d.session_date DESC LIMIT 1) AS close\n  FROM (SELECT DISTINCT session_date FROM m) s\n)\n-- The tooltip lists the series in this order.\nSELECT m.ts_epoch AS time,\n       m.open AS \"Open\", m.close AS \"Close\", m.high AS \"High\", m.low AS \"Low\", m.volume AS \"Volume\",\n       CASE WHEN m.n >= 10 THEN e.e10 END AS \"EMA 10m\",\n       CASE WHEN m.n >= 60 THEN e.e60 END AS \"EMA 60m\",\n       -- blank on each session's first candle but the first, so the line breaks between sessions\n       CASE WHEN m.n > 1 OR m.ts_epoch = (SELECT MIN(ts_epoch) FROM m WHERE ts_epoch >= $__from / 1000)\n            THEN p.close END AS \"Previous day's close\"\nFROM m JOIN ema e ON e.session_date = m.session_date AND e.n = m.n\nLEFT JOIN prev p ON p.session_date = m.session_date\nWHERE m.ts_epoch BETWEEN $__from / 1000 AND $__to / 1000\nORDER BY m.ts_epoch",
      "queryType": "table",
      "timeColumns": [
       "time"
@@ -1127,13 +1127,15 @@
     "defaults": {
      "unit": "locale",
      "decimals": 2,
-     "custom": {}
+     "custom": {
+      "lineWidth": 1
+     }
     },
     "overrides": [
      {
       "matcher": {
        "id": "byName",
-       "options": "volume"
+       "options": "Volume"
       },
       "properties": [
        {
@@ -1143,6 +1145,105 @@
        {
         "id": "decimals",
         "value": 0
+       },
+       {
+        "id": "custom.axisPlacement",
+        "value": "right"
+       },
+       {
+        "id": "custom.axisLabel",
+        "value": "Volume"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "EMA 10m"
+      },
+      "properties": [
+       {
+        "id": "custom.drawStyle",
+        "value": "line"
+       },
+       {
+        "id": "custom.lineWidth",
+        "value": 2
+       },
+       {
+        "id": "custom.showPoints",
+        "value": "never"
+       },
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "yellow"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "EMA 60m"
+      },
+      "properties": [
+       {
+        "id": "custom.drawStyle",
+        "value": "line"
+       },
+       {
+        "id": "custom.lineWidth",
+        "value": 2
+       },
+       {
+        "id": "custom.showPoints",
+        "value": "never"
+       },
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Previous day's close"
+      },
+      "properties": [
+       {
+        "id": "custom.drawStyle",
+        "value": "line"
+       },
+       {
+        "id": "custom.lineWidth",
+        "value": 2
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          2,
+          4
+         ]
+        }
+       },
+       {
+        "id": "custom.showPoints",
+        "value": "never"
+       },
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "text"
+        }
        }
       ]
      }
@@ -1154,13 +1255,27 @@
     "colorStrategy": "open-close",
     "colors": {
      "up": "green",
-     "down": "red"
+     "down": "red",
+     "flat": "gray"
     },
-    "includeAllFields": false,
+    "includeAllFields": true,
+    "fields": {
+     "open": "Open",
+     "high": "High",
+     "low": "Low",
+     "close": "Close",
+     "volume": "Volume"
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "none",
+     "hideZeros": false
+    },
     "legend": {
-     "showLegend": false,
+     "showLegend": true,
      "displayMode": "list",
-     "placement": "bottom"
+     "placement": "bottom",
+     "calcs": []
     }
    }
   }

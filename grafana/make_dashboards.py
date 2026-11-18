@@ -64,6 +64,9 @@ QUICK_RANGES = [
 ]
 TRADING_HOURS = QUICK_RANGES[0]  # "Today's trading hours": 09:15 today to now
 FAMILY = "substr(model_version, 1, instr(model_version, '/') - 1)"
+# The sessions (IST dates) the time range touches.
+SESSION_FROM = "date($__from / 1000, 'unixepoch', '+5 hours', '+30 minutes')"
+SESSION_TO = "date($__to / 1000, 'unixepoch', '+5 hours', '+30 minutes')"
 
 
 def target(sql: str, ds=SP, time=True, ref="A") -> dict:
@@ -282,18 +285,64 @@ ORDER BY as_of""")],
         "type": "candlestick", "title": "$symbol: what the price did (minute candles)", "datasource": SA,
         "description": "stock-analyzer's one-minute candles for the same time range, read without writing to its "
                        "database; the candle still forming is left out. Compare with the predicted range on the "
-                       "left: did the price get there? Green markers: runs where the stock was flagged.",
-        "targets": [target("""
-SELECT ts_epoch AS time, open, high, low, close, volume
-FROM v_intraday_merged
-WHERE symbol = '${symbol}' AND ts_epoch BETWEEN $__from / 1000 AND $__to / 1000
-  AND COALESCE(source, '') != 'forming'
-ORDER BY ts_epoch""", ds=SA)],
-        "fieldConfig": {"defaults": {**PRICE, "custom": {}},
-                        "overrides": [override("volume", unit="short", decimals=0)]},
+                       "left: did the price get there? Green markers: runs where the stock was flagged.\n\n"
+                       "The tooltip, as on stock-analyzer's Candles and Calls: Open, Close, High, Low, Volume, then\n"
+                       "- **EMA 10m / 60m** (yellow, blue): exponential moving averages of the minute closes, "
+                       "weighted 2/(N+1) (N = 10, 60). Each restarts with its session's first close and appears "
+                       "once N minutes have passed. (Candles and Calls draws simple averages, SMA.)\n"
+                       "- **Previous day's close** (dotted): the close of the session before, the price the day's "
+                       "move is measured from (stock-analyzer's daily candle).",
+        "targets": [target(f"""
+-- Whole sessions, so each average starts at its session's open even when the time range starts later.
+WITH m AS MATERIALIZED (
+  SELECT ts_epoch, session_date, open, high, low, close, volume,
+         ROW_NUMBER() OVER (PARTITION BY session_date ORDER BY ts_epoch) AS n
+  FROM v_intraday_merged
+  WHERE symbol = '${{symbol}}' AND COALESCE(source, '') != 'forming'
+    AND session_date BETWEEN {SESSION_FROM} AND {SESSION_TO}
+),
+-- EMA: the last value moved 2/(N+1) of the way to each new close, from the session's first close.
+ema(session_date, n, e10, e60) AS (
+  SELECT session_date, n, close, close FROM m WHERE n = 1
+  UNION ALL
+  SELECT m.session_date, m.n, e.e10 + (2.0 / 11) * (m.close - e.e10), e.e60 + (2.0 / 61) * (m.close - e.e60)
+  FROM ema e JOIN m ON m.session_date = e.session_date AND m.n = e.n + 1
+),
+prev AS (
+  SELECT s.session_date,
+         (SELECT d.close FROM v_daily_candles d WHERE d.symbol = '${{symbol}}' AND d.session_date < s.session_date
+          ORDER BY d.session_date DESC LIMIT 1) AS close
+  FROM (SELECT DISTINCT session_date FROM m) s
+)
+-- The tooltip lists the series in this order.
+SELECT m.ts_epoch AS time,
+       m.open AS "Open", m.close AS "Close", m.high AS "High", m.low AS "Low", m.volume AS "Volume",
+       CASE WHEN m.n >= 10 THEN e.e10 END AS "EMA 10m",
+       CASE WHEN m.n >= 60 THEN e.e60 END AS "EMA 60m",
+       -- blank on each session's first candle but the first, so the line breaks between sessions
+       CASE WHEN m.n > 1 OR m.ts_epoch = (SELECT MIN(ts_epoch) FROM m WHERE ts_epoch >= $__from / 1000)
+            THEN p.close END AS "Previous day's close"
+FROM m JOIN ema e ON e.session_date = m.session_date AND e.n = m.n
+LEFT JOIN prev p ON p.session_date = m.session_date
+WHERE m.ts_epoch BETWEEN $__from / 1000 AND $__to / 1000
+ORDER BY m.ts_epoch""", ds=SA)],
+        "fieldConfig": {"defaults": {**PRICE, "custom": {"lineWidth": 1}},
+                        "overrides": [
+                            override("Volume", unit="short", decimals=0, custom__axisPlacement="right",
+                                     custom__axisLabel="Volume"),
+                            override("EMA 10m", custom__drawStyle="line", custom__lineWidth=2,
+                                     custom__showPoints="never", color={"mode": "fixed", "fixedColor": "yellow"}),
+                            override("EMA 60m", custom__drawStyle="line", custom__lineWidth=2,
+                                     custom__showPoints="never", color={"mode": "fixed", "fixedColor": "blue"}),
+                            override("Previous day's close", custom__drawStyle="line", custom__lineWidth=2,
+                                     custom__lineStyle={"fill": "dash", "dash": [2, 4]}, custom__showPoints="never",
+                                     color={"mode": "fixed", "fixedColor": "text"}),
+                        ]},
         "options": {"mode": "candles+volume", "candleStyle": "candles", "colorStrategy": "open-close",
-                    "colors": {"up": "green", "down": "red"}, "includeAllFields": False,
-                    "legend": {"showLegend": False, "displayMode": "list", "placement": "bottom"}},
+                    "colors": {"up": "green", "down": "red", "flat": "gray"}, "includeAllFields": True,
+                    "fields": {"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"},
+                    "tooltip": {"mode": "multi", "sort": "none", "hideZeros": False},
+                    "legend": {"showLegend": True, "displayMode": "list", "placement": "bottom", "calcs": []}},
     }, 14, y, 10, 11)
 
     return dashboard(PICKS_UID, "Predicted Picks",
