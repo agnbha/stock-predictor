@@ -1,6 +1,6 @@
 {
  "uid": "stockpredictor-picks",
- "title": "Picks, per stock",
+ "title": "Predicted Picks",
  "description": "What today.sh said about each stock at every run (the Range in price, the entry price and the chance), and what the price did. Runs come from summary --record, which today.sh and schedule-today.sh do by default.",
  "tags": [
   "stock-predictor"
@@ -12,9 +12,164 @@
  "version": 1,
  "refresh": "1m",
  "time": {
-  "from": "now/d",
-  "to": "now/d"
+  "from": "now/d+9h+15m",
+  "to": "now"
  },
+ "timepicker": {
+  "quick_ranges": [
+   {
+    "display": "Today's trading hours",
+    "from": "now/d+9h+15m",
+    "to": "now"
+   },
+   {
+    "display": "This week (Monday 9:15 → now)",
+    "from": "now/w+9h+15m",
+    "to": "now"
+   },
+   {
+    "display": "Last 2 days",
+    "from": "now-2d",
+    "to": "now"
+   },
+   {
+    "display": "Last 7 days",
+    "from": "now-7d",
+    "to": "now"
+   },
+   {
+    "display": "Last 30 days",
+    "from": "now-30d",
+    "to": "now"
+   },
+   {
+    "display": "Last 90 days",
+    "from": "now-90d",
+    "to": "now"
+   },
+   {
+    "display": "Last 6 months",
+    "from": "now-6M",
+    "to": "now"
+   },
+   {
+    "display": "Last 1 year",
+    "from": "now-1y",
+    "to": "now"
+   },
+   {
+    "display": "Last 2 years",
+    "from": "now-2y",
+    "to": "now"
+   },
+   {
+    "display": "Last 5 years",
+    "from": "now-5y",
+    "to": "now"
+   },
+   {
+    "display": "Yesterday",
+    "from": "now-1d/d",
+    "to": "now-1d/d"
+   },
+   {
+    "display": "Day before yesterday",
+    "from": "now-2d/d",
+    "to": "now-2d/d"
+   },
+   {
+    "display": "This day last week",
+    "from": "now-7d/d",
+    "to": "now-7d/d"
+   },
+   {
+    "display": "Previous week",
+    "from": "now-1w/w",
+    "to": "now-1w/w"
+   },
+   {
+    "display": "Previous month",
+    "from": "now-1M/M",
+    "to": "now-1M/M"
+   },
+   {
+    "display": "Previous fiscal quarter",
+    "from": "now-1Q/fQ",
+    "to": "now-1Q/fQ"
+   },
+   {
+    "display": "Previous year",
+    "from": "now-1y/y",
+    "to": "now-1y/y"
+   },
+   {
+    "display": "Previous fiscal year",
+    "from": "now-1y/fy",
+    "to": "now-1y/fy"
+   },
+   {
+    "display": "Today",
+    "from": "now/d",
+    "to": "now/d"
+   },
+   {
+    "display": "Today so far",
+    "from": "now/d",
+    "to": "now"
+   },
+   {
+    "display": "This week",
+    "from": "now/w",
+    "to": "now/w"
+   },
+   {
+    "display": "This week so far",
+    "from": "now/w",
+    "to": "now"
+   },
+   {
+    "display": "This month",
+    "from": "now/M",
+    "to": "now/M"
+   },
+   {
+    "display": "This month so far",
+    "from": "now/M",
+    "to": "now"
+   },
+   {
+    "display": "This year",
+    "from": "now/y",
+    "to": "now/y"
+   },
+   {
+    "display": "This year so far",
+    "from": "now/y",
+    "to": "now"
+   },
+   {
+    "display": "This fiscal quarter so far",
+    "from": "now/fQ",
+    "to": "now"
+   },
+   {
+    "display": "This fiscal quarter",
+    "from": "now/fQ",
+    "to": "now/fQ"
+   },
+   {
+    "display": "This fiscal year so far",
+    "from": "now/fy",
+    "to": "now"
+   },
+   {
+    "display": "This fiscal year",
+    "from": "now/fy",
+    "to": "now/fy"
+   }
+  ]
+ },
+ "weekStart": "monday",
  "annotations": {
   "list": [
    {
@@ -318,12 +473,12 @@
     "h": 12
    },
    "type": "table",
-   "title": "Latest run, every stock",
+   "title": "Latest run, every stock (click a stock to chart it)",
    "datasource": {
     "type": "frser-sqlite-datasource",
     "uid": "stock-predictor-sqlite"
    },
-   "description": "Every stock at the latest run, most likely first. Edge is the chance minus the base rate, in points; ✓ marks a stock 10+ points above it. Range in price is the p25-p75 of the best price expected later today; Entry is the most to pay, 0.6% below its low end (or the price then).",
+   "description": "Every stock at the latest run, most likely first. **Click a stock's name** to add it to the charts below (the Stocks box at the top), or to show only it. Edge is the chance minus the base rate, in points; ✓ marks a stock 10+ points above it. Range in price is the p25-p75 of the best price expected later today; Entry is the most to pay, 0.6% below its low end (or the price then).",
    "targets": [
     {
      "datasource": {
@@ -442,12 +597,99 @@
      {
       "matcher": {
        "id": "byName",
+       "options": "Price"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "locale"
+       },
+       {
+        "id": "decimals",
+        "value": 2
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Range low"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "locale"
+       },
+       {
+        "id": "decimals",
+        "value": 2
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Range high"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "locale"
+       },
+       {
+        "id": "decimals",
+        "value": 2
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Entry"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "locale"
+       },
+       {
+        "id": "decimals",
+        "value": 2
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
        "options": "Flag"
       },
       "properties": [
        {
         "id": "custom.width",
         "value": 60
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Stock"
+      },
+      "properties": [
+       {
+        "id": "links",
+        "value": [
+         {
+          "title": "Add ${__value.raw} to the charts below",
+          "targetBlank": false,
+          "url": "/d/stockpredictor-picks/predicted-picks?${__url_time_range}&${family:queryparam}&${symbol:queryparam}&var-symbol=${__value.raw:percentencode}"
+         },
+         {
+          "title": "Show only ${__value.raw}",
+          "targetBlank": false,
+          "url": "/d/stockpredictor-picks/predicted-picks?${__url_time_range}&${family:queryparam}&var-symbol=${__value.raw:percentencode}"
+         }
+        ]
        }
       ]
      }
@@ -630,7 +872,7 @@
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "currencyINR",
+     "unit": "locale",
      "decimals": 2,
      "custom": {
       "drawStyle": "line",
@@ -883,7 +1125,7 @@
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "currencyINR",
+     "unit": "locale",
      "decimals": 2,
      "custom": {}
     },
@@ -897,6 +1139,10 @@
        {
         "id": "unit",
         "value": "short"
+       },
+       {
+        "id": "decimals",
+        "value": 0
        }
       ]
      }

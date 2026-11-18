@@ -94,7 +94,7 @@ admin_password = admin
 default_theme = dark
 
 [dashboards]
-default_home_dashboard_path = $GRAFANA_DIR/dashboards/01-picks-per-stock.json
+default_home_dashboard_path = $GRAFANA_DIR/dashboards/01-predicted-picks.json
 
 [analytics]
 reporting_enabled = false

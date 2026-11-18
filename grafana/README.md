@@ -29,10 +29,17 @@ The dashboards fill as runs are recorded. `scripts/schedule-today.sh install`
 records a run every 10 minutes from 09:20 to 14:50 on weekdays. The evening
 refresh scores each day's predictions.
 
-## Picks, per stock
+## Predicted Picks
 
 One row of charts for each stock picked in the **Stocks** box. The box lists
-the stocks by chance at the latest run, most likely first.
+the stocks by chance at the latest run, most likely first. You can also pick
+stocks from the **Latest run, every stock** table: click a stock's name and
+choose **Add it to the charts below** (keeps the stocks already picked) or
+**Show only it**. Either fills the Stocks box, keeping the time range and the
+model. To take a stock off, untick it in the Stocks box.
+
+The time picker has the same options as stock-analyzer's **Candles and Calls**
+page, and it opens on **Today's trading hours** (09:15 today to now).
 
 - **Range in price, entry and chance at each run.** Time runs along the
   bottom, with one candle per `today.sh` run:
@@ -51,7 +58,8 @@ the stocks by chance at the latest run, most likely first.
 
 Above the rows are:
 - the latest run's base rate, and how many stocks were flagged or had 50%+;
-- every stock at the latest run, with the same columns as `today.sh`;
+- every stock at the latest run, with the same columns as `today.sh` (click a
+  name to chart it);
 - the flagged count and the base rate, run by run.
 
 The **Model** box switches between `today.sh`'s models. Pick

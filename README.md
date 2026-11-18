@@ -373,10 +373,11 @@ appends its summary to `data/logs/today/<date>.log`.
 `grafana/run-local.sh` starts a Grafana at http://localhost:3001, beside
 stock-analyzer's on 3000. It reuses that one's download when it is there.
 There are two dashboards:
-- **Picks, per stock.** For each stock you pick, one candle per run spans the
+- **Predicted Picks.** For each stock you pick, one candle per run spans the
   Range in price, a line shows the entry price, and bars show the chance. Next
   to it are stock-analyzer's minute candles for the same hours, and runs where
-  the stock was flagged are marked.
+  the stock was flagged are marked. Pick stocks in the Stocks box, or click a
+  name in the latest-run table.
 - **How the picks did.** The scored predictions by session, the chance and the
   edge against what happened, a track record per stock, and the held-out check
   behind the chances.

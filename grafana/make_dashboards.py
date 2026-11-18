@@ -22,7 +22,47 @@ OUT = Path(__file__).with_name("dashboards")
 SP = {"type": "frser-sqlite-datasource", "uid": "stock-predictor-sqlite"}
 SA = {"type": "frser-sqlite-datasource", "uid": "stock-analyzer-readonly"}
 ENTRY_MARGIN = 0.6  # serving/summary.py ENTRY_MARGIN_PCT
+# Prices as stock-analyzer's Candles and Calls shows them: the full value in rupees and paise
+# (11,053.15), never abbreviated (Grafana's currency units turn that into ₹11.1K).
+PRICE = {"unit": "locale", "decimals": 2}
 IN_RANGE = "as_of BETWEEN $__from / 1000 AND $__to / 1000"
+# The first dashboard keeps its uid, so links and bookmarks made before it was renamed still open it.
+PICKS_UID, PICKS_SLUG = "stockpredictor-picks", "predicted-picks"
+# The time picker's options, exactly as stock-analyzer's Candles and Calls dashboard has them
+# (grafana/dashboards/02-candles-and-calls.json there). The first is Predicted Picks' default.
+QUICK_RANGES = [
+    {"display": "Today's trading hours", "from": "now/d+9h+15m", "to": "now"},
+    {"display": "This week (Monday 9:15 → now)", "from": "now/w+9h+15m", "to": "now"},
+    {"display": "Last 2 days", "from": "now-2d", "to": "now"},
+    {"display": "Last 7 days", "from": "now-7d", "to": "now"},
+    {"display": "Last 30 days", "from": "now-30d", "to": "now"},
+    {"display": "Last 90 days", "from": "now-90d", "to": "now"},
+    {"display": "Last 6 months", "from": "now-6M", "to": "now"},
+    {"display": "Last 1 year", "from": "now-1y", "to": "now"},
+    {"display": "Last 2 years", "from": "now-2y", "to": "now"},
+    {"display": "Last 5 years", "from": "now-5y", "to": "now"},
+    {"display": "Yesterday", "from": "now-1d/d", "to": "now-1d/d"},
+    {"display": "Day before yesterday", "from": "now-2d/d", "to": "now-2d/d"},
+    {"display": "This day last week", "from": "now-7d/d", "to": "now-7d/d"},
+    {"display": "Previous week", "from": "now-1w/w", "to": "now-1w/w"},
+    {"display": "Previous month", "from": "now-1M/M", "to": "now-1M/M"},
+    {"display": "Previous fiscal quarter", "from": "now-1Q/fQ", "to": "now-1Q/fQ"},
+    {"display": "Previous year", "from": "now-1y/y", "to": "now-1y/y"},
+    {"display": "Previous fiscal year", "from": "now-1y/fy", "to": "now-1y/fy"},
+    {"display": "Today", "from": "now/d", "to": "now/d"},
+    {"display": "Today so far", "from": "now/d", "to": "now"},
+    {"display": "This week", "from": "now/w", "to": "now/w"},
+    {"display": "This week so far", "from": "now/w", "to": "now"},
+    {"display": "This month", "from": "now/M", "to": "now/M"},
+    {"display": "This month so far", "from": "now/M", "to": "now"},
+    {"display": "This year", "from": "now/y", "to": "now/y"},
+    {"display": "This year so far", "from": "now/y", "to": "now"},
+    {"display": "This fiscal quarter so far", "from": "now/fQ", "to": "now"},
+    {"display": "This fiscal quarter", "from": "now/fQ", "to": "now/fQ"},
+    {"display": "This fiscal year so far", "from": "now/fy", "to": "now"},
+    {"display": "This fiscal year", "from": "now/fy", "to": "now/fy"},
+]
+TRADING_HOURS = QUICK_RANGES[0]  # "Today's trading hours": 09:15 today to now
 FAMILY = "substr(model_version, 1, instr(model_version, '/') - 1)"
 
 
@@ -70,19 +110,20 @@ def variable(name, label, sql, multi=False, desc="", refresh=2, ds=SP):
 
 
 def dashboard(uid, title, desc, panels, templating, annotations=(), time_from="now/d", time_to="now/d",
-              refresh="1m"):
+              refresh="1m", quick_ranges=None):
     return {"uid": uid, "title": title, "description": desc, "tags": ["stock-predictor"],
             "timezone": "Asia/Kolkata", "editable": True, "graphTooltip": 1, "schemaVersion": 39, "version": 1,
             "refresh": refresh, "time": {"from": time_from, "to": time_to},
+            **({"timepicker": {"quick_ranges": quick_ranges}, "weekStart": "monday"} if quick_ranges else {}),
             "annotations": {"list": [{"builtIn": 1, "datasource": {"type": "grafana", "uid": "-- Grafana --"},
                                       "enable": True, "hide": True, "iconColor": "rgba(0, 211, 255, 1)",
                                       "name": "Annotations & Alerts", "type": "dashboard"}, *annotations]},
             "templating": {"list": templating}, "panels": panels}
 
 
-# -- 1. Picks, per stock -------------------------------------------------------
+# -- 1. Predicted Picks -----------------------------------------------------------
 
-def picks_per_stock() -> dict:
+def predicted_picks() -> dict:
     lay = Layout()
     today_family = f"kind = 'today' AND model_version LIKE '${{family}}/%'"
     latest = (f"(SELECT MAX(as_of) FROM summary_pick WHERE {today_family} AND {IN_RANGE})")
@@ -126,12 +167,22 @@ WHERE {today_family} AND flagged = 1 AND symbol IN (${{symbol:sqlstring}}) AND {
                  desc="Stocks with a chance of 50% or more at the latest run."), 18, y, 6, 4)
     y += 4
 
+    # Clicking a stock's name reopens this dashboard with the Stocks box set: the stock added to the
+    # ones picked, or on its own. Same time range and model.
+    here = f"/d/{PICKS_UID}/{PICKS_SLUG}?${{__url_time_range}}&${{family:queryparam}}"
+    pick_links = [
+        {"title": "Add ${__value.raw} to the charts below", "targetBlank": False,
+         "url": here + "&${symbol:queryparam}&var-symbol=${__value.raw:percentencode}"},
+        {"title": "Show only ${__value.raw}", "targetBlank": False,
+         "url": here + "&var-symbol=${__value.raw:percentencode}"},
+    ]
     table = lay.add({
-        "type": "table", "title": "Latest run, every stock", "datasource": SP,
-        "description": "Every stock at the latest run, most likely first. Edge is the chance minus the base rate, "
-                       "in points; ✓ marks a stock 10+ points above it. Range in price is the p25-p75 of the best "
-                       f"price expected later today; Entry is the most to pay, {ENTRY_MARGIN:g}% below its low "
-                       "end (or the price then).",
+        "type": "table", "title": "Latest run, every stock (click a stock to chart it)", "datasource": SP,
+        "description": "Every stock at the latest run, most likely first. **Click a stock's name** to add it to "
+                       "the charts below (the Stocks box at the top), or to show only it. Edge is the chance minus "
+                       "the base rate, in points; ✓ marks a stock 10+ points above it. Range in price is the "
+                       f"p25-p75 of the best price expected later today; Entry is the most to pay, {ENTRY_MARGIN:g}% "
+                       "below its low end (or the price then).",
         "targets": [target(f"""
 SELECT rank AS "#", symbol AS "Stock", price AS "Price", chance * 100 AS "Chance",
        CASE WHEN base_rate IS NULL THEN NULL ELSE (chance - base_rate) * 100 END AS "Edge",
@@ -150,7 +201,9 @@ ORDER BY rank""", time=False)],
                                      thresholds={"mode": "absolute", "steps": [
                                          {"color": "text", "value": None}, {"color": "green", "value": 10}]}),
                             override("Median gain", unit="percent"),
+                            *(override(c, **PRICE) for c in ("Price", "Range low", "Range high", "Entry")),
                             override("Flag", custom__width=60),
+                            override("Stock", links=pick_links),
                         ]},
         "options": {"showHeader": True, "cellHeight": "sm", "footer": {"show": False}},
     }, 0, y, 15, 12)
@@ -199,7 +252,7 @@ SELECT as_of AS time,
 FROM summary_pick
 WHERE {today_family} AND symbol = '${{symbol}}' AND {IN_RANGE}
 ORDER BY as_of""")],
-        "fieldConfig": {"defaults": {"unit": "currencyINR", "decimals": 2,
+        "fieldConfig": {"defaults": {**PRICE,
                                      "custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 0,
                                                 "axisPlacement": "left", "axisLabel": "Price"}},
                         "overrides": [
@@ -236,18 +289,19 @@ FROM v_intraday_merged
 WHERE symbol = '${symbol}' AND ts_epoch BETWEEN $__from / 1000 AND $__to / 1000
   AND COALESCE(source, '') != 'forming'
 ORDER BY ts_epoch""", ds=SA)],
-        "fieldConfig": {"defaults": {"unit": "currencyINR", "decimals": 2, "custom": {}},
-                        "overrides": [override("volume", unit="short")]},
+        "fieldConfig": {"defaults": {**PRICE, "custom": {}},
+                        "overrides": [override("volume", unit="short", decimals=0)]},
         "options": {"mode": "candles+volume", "candleStyle": "candles", "colorStrategy": "open-close",
                     "colors": {"up": "green", "down": "red"}, "includeAllFields": False,
                     "legend": {"showLegend": False, "displayMode": "list", "placement": "bottom"}},
     }, 14, y, 10, 11)
 
-    return dashboard("stockpredictor-picks", "Picks, per stock",
+    return dashboard(PICKS_UID, "Predicted Picks",
                      "What today.sh said about each stock at every run (the Range in price, the entry price and the "
                      "chance), and what the price did. Runs come from summary --record, which today.sh and "
                      "schedule-today.sh do by default.",
-                     lay.panels, templating, annotations)
+                     lay.panels, templating, annotations, time_from=TRADING_HOURS["from"],
+                     time_to=TRADING_HOURS["to"], quick_ranges=QUICK_RANGES)
 
 
 # -- 2. How the picks did ----------------------------------------------------------
@@ -421,7 +475,7 @@ ORDER BY json_extract(p.value, '$.point')""", time=False)],
 
 def main() -> None:
     OUT.mkdir(exist_ok=True)
-    for name, d in (("01-picks-per-stock.json", picks_per_stock()), ("02-how-the-picks-did.json", how_they_did())):
+    for name, d in (("01-predicted-picks.json", predicted_picks()), ("02-how-the-picks-did.json", how_they_did())):
         (OUT / name).write_text(json.dumps(d, indent=1, ensure_ascii=False) + "\n")
         print(f"wrote {OUT / name}: {len(d['panels'])} panels")
 

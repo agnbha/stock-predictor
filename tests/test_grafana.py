@@ -94,7 +94,7 @@ def test_every_predictor_query_runs(path, filled_store):
 
 
 def test_the_per_stock_chart_has_the_range_the_entry_and_the_chance(filled_store):
-    d = json.loads((ROOT / "grafana" / "dashboards" / "01-picks-per-stock.json").read_text())
+    d = json.loads((ROOT / "grafana" / "dashboards" / "01-predicted-picks.json").read_text())
     panel = next(p for p in d["panels"] if p["type"] == "candlestick" and p["datasource"]["uid"] == "stock-predictor-sqlite")
     cur = filled_store._conn.execute(_fill(panel["targets"][0]["queryText"], "sklearn-target-0.5pct-close"))
     cols = [c[0] for c in cur.description]
@@ -110,6 +110,49 @@ def test_the_per_stock_chart_has_the_range_the_entry_and_the_chance(filled_store
     props = {p["id"]: p["value"] for p in chance["properties"]}
     assert props["custom.drawStyle"] == "bars" and props["custom.axisPlacement"] == "right"
     assert any(p.get("repeat") == "symbol" for p in d["panels"])  # one row of charts per stock picked
+
+
+def test_clicking_a_stock_in_the_latest_run_sets_the_stocks_box():
+    d = json.loads((ROOT / "grafana" / "dashboards" / "01-predicted-picks.json").read_text())
+    assert d["title"] == "Predicted Picks" and d["uid"] == "stockpredictor-picks"  # renamed, same links
+    table = next(p for p in d["panels"] if p["type"] == "table" and p["title"].startswith("Latest run"))
+    stock = next(o for o in table["fieldConfig"]["overrides"] if o["matcher"]["options"] == "Stock")
+    add, only = next(p["value"] for p in stock["properties"] if p["id"] == "links")
+    for link in (add, only):
+        assert link["url"].startswith("/d/stockpredictor-picks/predicted-picks?${__url_time_range}&${family:queryparam}")
+        assert link["url"].endswith("&var-symbol=${__value.raw:percentencode}")  # M&M stays one stock
+        assert link["targetBlank"] is False
+    assert "&${symbol:queryparam}&" in add["url"]      # keeps the stocks already picked
+    assert "${symbol:queryparam}" not in only["url"]   # replaces them
+    names = {v["name"] for v in d["templating"]["list"]}
+    assert {"family", "symbol"} <= names
+
+
+def test_prices_show_full_rupees_and_paise():
+    """As Candles and Calls: the locale unit with 2 decimals (11,053.15), never a currency unit,
+    which Grafana abbreviates above 999 (₹11.1K)."""
+    text = (ROOT / "grafana" / "dashboards" / "01-predicted-picks.json").read_text()
+    assert "currency" not in text
+    d = json.loads(text)
+    for p in d["panels"]:
+        if p["type"] == "candlestick":
+            assert (p["fieldConfig"]["defaults"]["unit"], p["fieldConfig"]["defaults"]["decimals"]) == ("locale", 2)
+    table = next(p for p in d["panels"] if p["type"] == "table")
+    units = {o["matcher"]["options"]: {x["id"]: x["value"] for x in o["properties"]}
+             for o in table["fieldConfig"]["overrides"]}
+    for col in ("Price", "Range low", "Range high", "Entry"):
+        assert units[col] == {"unit": "locale", "decimals": 2}, col
+
+
+def test_predicted_picks_opens_on_todays_trading_hours_with_stock_analyzers_time_options():
+    d = json.loads((ROOT / "grafana" / "dashboards" / "01-predicted-picks.json").read_text())
+    ranges = d["timepicker"]["quick_ranges"]
+    assert ranges[0] == {"display": "Today's trading hours", "from": "now/d+9h+15m", "to": "now"}
+    assert d["time"] == {"from": "now/d+9h+15m", "to": "now"}  # selected by default
+    assert d["weekStart"] == "monday" and d["timezone"] == "Asia/Kolkata"
+    theirs = CONFIG.analyzer_db.parent.parent / "grafana" / "dashboards" / "02-candles-and-calls.json"
+    if theirs.exists():  # the same options, in the same order, as stock-analyzer's Candles and Calls
+        assert ranges == json.loads(theirs.read_text())["timepicker"]["quick_ranges"]
 
 
 @pytest.mark.skipif(not CONFIG.analyzer_db.exists(), reason="needs stock-analyzer's database")
