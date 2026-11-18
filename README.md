@@ -93,7 +93,7 @@ stock-predictor scorecard --days 30                                 # each stock
 scripts/refresh.sh                                                  # the daily refresh (after stock-analyzer's 18:30 batch)
 scripts/schedule-refresh.sh install                                 # run it every weekday at 19:15 (launchd)
 scripts/schedule-today.sh install                                   # today.sh every 10 min, 09:20-14:50, weekdays
-grafana/run-local.sh                                                # the Grafana dashboards, http://localhost:3001
+grafana/add-to-stock-analyzer.sh                                    # a Stock Predictor folder in stock-analyzer's Grafana
 stock-predictor models                                              # what each model was trained on
 stock-predictor train --target 0.5 --to-close --band max-gain --minute-step 3 --all-sessions
 stock-predictor predict --model latest --min-chance 50               # more likely than not
@@ -370,13 +370,15 @@ appends its summary to `data/logs/today/<date>.log`.
 
 ### Grafana
 
-`grafana/run-local.sh` starts a Grafana at http://localhost:3001, beside
-stock-analyzer's on 3000. It reuses that one's download when it is there.
-There are two dashboards:
-- **Picks, per stock.** For each stock you pick, one candle per run spans the
+The dashboards go in stock-analyzer's Grafana (http://localhost:3000), as a
+"Stock Predictor" folder beside its "Stock Analyzer" one; there is no second
+Grafana. `grafana/add-to-stock-analyzer.sh` adds them, and restarting that
+Grafana loads them. There are two dashboards:
+- **Predicted Picks.** For each stock you pick, one candle per run spans the
   Range in price, a line shows the entry price, and bars show the chance. Next
   to it are stock-analyzer's minute candles for the same hours, and runs where
-  the stock was flagged are marked.
+  the stock was flagged are marked. Pick stocks in the Stocks box, or click a
+  name in the latest-run table.
 - **How the picks did.** The scored predictions by session, the chance and the
   edge against what happened, a track record per stock, and the held-out check
   behind the chances.
@@ -507,7 +509,8 @@ scripts/today.sh     the on-demand summary: retrains when stale, records, then `
 scripts/tomorrow.sh  the next session's summary, after today's scorecard (today.sh --tomorrow)
 scripts/refresh.sh   the daily refresh; schedule-refresh.sh installs it in launchd
 scripts/schedule-today.sh  today.sh every 10 minutes through the session, in launchd
-grafana/             run-local.sh, the provisioning, and the dashboards (make_dashboards.py writes them)
+grafana/             the dashboards (make_dashboards.py writes them), their provisioning, and
+                     add-to-stock-analyzer.sh, which adds them to stock-analyzer's Grafana
 
 tests/               leakage, targets, splits, metrics, charges, baselines,
                      feature parity (vs stock-analyzer's pinned fixture), aggregation, API,

@@ -1,3 +1,5 @@
+# The "Stock Predictor" folder in stock-analyzer's Grafana, beside its "Stock Analyzer" one.
+# grafana/add-to-stock-analyzer.sh fills in the path: this repo's grafana/dashboards.
 apiVersion: 1
 
 providers:

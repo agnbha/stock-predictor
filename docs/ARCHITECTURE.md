@@ -245,7 +245,7 @@ stock-analyzer monitor ──► POST /predict/intraday (every tracked symbol, e
 | **Held-out checks, for SQL** | `data/stock-predictor.db`, table `model_evaluation` | `evaluate-target --record`; `models --to-store` copies older ones | A copy of each `evaluation.json` beside the models, for the Grafana dashboards | ~30 KB a check |
 | **Refresh log** | `data/logs/refresh.log` | `scripts/refresh.sh` | What each daily refresh did | A few KB a day |
 | **Intraday run logs** | `data/logs/today/<date>.log` | `scripts/schedule-today.sh` | Each scheduled `today.sh` summary, 34 a day | ~5 KB a run, ~175 KB a day |
-| **Grafana's own state** | `grafana/.runtime/` (git-ignored) | `grafana/run-local.sh` | Its settings, sessions and logs; delete to reset | A few MB |
+| **Grafana provisioning** | `stock-analyzer/grafana/.runtime/provisioning/{datasources,dashboards}/stock-predictor.yaml` | `grafana/add-to-stock-analyzer.sh` | The Stock Predictor datasources and folder, in stock-analyzer's Grafana; the dashboards themselves stay in this repo's `grafana/dashboards` | Two small files |
 | **Training matrix** | Memory of `train` | `train` | One float64 matrix of features, plus labels | Section 5 |
 | **Parameters** | `params.example.toml` or your own file (`STOCK_PREDICTOR_PARAMS`) | You | Candidate-input switches (DESIGN 4.1) | — |
 

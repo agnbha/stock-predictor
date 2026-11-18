@@ -94,7 +94,7 @@ def test_every_predictor_query_runs(path, filled_store):
 
 
 def test_the_per_stock_chart_has_the_range_the_entry_and_the_chance(filled_store):
-    d = json.loads((ROOT / "grafana" / "dashboards" / "01-picks-per-stock.json").read_text())
+    d = json.loads((ROOT / "grafana" / "dashboards" / "01-predicted-picks.json").read_text())
     panel = next(p for p in d["panels"] if p["type"] == "candlestick" and p["datasource"]["uid"] == "stock-predictor-sqlite")
     cur = filled_store._conn.execute(_fill(panel["targets"][0]["queryText"], "sklearn-target-0.5pct-close"))
     cols = [c[0] for c in cur.description]
@@ -110,6 +110,80 @@ def test_the_per_stock_chart_has_the_range_the_entry_and_the_chance(filled_store
     props = {p["id"]: p["value"] for p in chance["properties"]}
     assert props["custom.drawStyle"] == "bars" and props["custom.axisPlacement"] == "right"
     assert any(p.get("repeat") == "symbol" for p in d["panels"])  # one row of charts per stock picked
+
+
+def test_clicking_a_stock_in_the_latest_run_sets_the_stocks_box():
+    d = json.loads((ROOT / "grafana" / "dashboards" / "01-predicted-picks.json").read_text())
+    assert d["title"] == "Predicted Picks" and d["uid"] == "stockpredictor-picks"  # renamed, same links
+    table = next(p for p in d["panels"] if p["type"] == "table" and p["title"].startswith("Latest run"))
+    stock = next(o for o in table["fieldConfig"]["overrides"] if o["matcher"]["options"] == "Stock")
+    add, only = next(p["value"] for p in stock["properties"] if p["id"] == "links")
+    for link in (add, only):
+        assert link["url"].startswith("/d/stockpredictor-picks/predicted-picks?${__url_time_range}&${family:queryparam}")
+        assert link["url"].endswith("&var-symbol=${__value.raw:percentencode}")  # M&M stays one stock
+        assert link["targetBlank"] is False
+    assert "&${symbol:queryparam}&" in add["url"]      # keeps the stocks already picked
+    assert "${symbol:queryparam}" not in only["url"]   # replaces them
+    names = {v["name"] for v in d["templating"]["list"]}
+    assert {"family", "symbol"} <= names
+
+
+@pytest.mark.skipif(not CONFIG.analyzer_db.exists(), reason="needs stock-analyzer's database")
+def test_the_minute_candles_tooltip_has_ohlc_volume_emas_and_the_previous_close():
+    from stock_predictor.data.analyzer import _connect_read_only
+
+    d = json.loads((ROOT / "grafana" / "dashboards" / "01-predicted-picks.json").read_text())
+    panel = next(p for p in d["panels"] if p["title"].endswith("what the price did (minute candles)"))
+    assert panel["options"]["includeAllFields"] is True and panel["options"]["tooltip"]["mode"] == "multi"
+    conn = _connect_read_only(CONFIG.analyzer_db)
+    session, symbol = conn.execute("SELECT session_date, symbol FROM v_intraday_candles "
+                                   "ORDER BY session_date DESC LIMIT 1").fetchone()
+    day = date.fromisoformat(session)
+    sql = panel["targets"][0]["queryText"].replace("${symbol}", symbol)
+    sql = sql.replace("$__from", str(NSE.epoch_of(day, time(9, 15)) * 1000))
+    sql = sql.replace("$__to", str(NSE.epoch_of(day, time(15, 30)) * 1000))
+    cur = conn.execute(sql)
+    cols = [c[0] for c in cur.description]
+    assert cols == ["time", "Open", "Close", "High", "Low", "Volume", "EMA 10m", "EMA 60m", "Previous day's close"]
+    rows = cur.fetchall()
+    closes = [r[2] for r in rows]
+    ema10, ema60 = closes[0], closes[0]
+    for c in closes[1:]:
+        ema10 += 2 / 11 * (c - ema10)
+        ema60 += 2 / 61 * (c - ema60)
+    assert rows[-1][6] == pytest.approx(ema10) and rows[-1][7] == pytest.approx(ema60)
+    assert rows[8][6] is None and rows[9][6] is not None   # an average appears once its span has passed
+    prev = conn.execute("SELECT close FROM v_daily_candles WHERE symbol = ? AND session_date < ? "
+                        "ORDER BY session_date DESC LIMIT 1", (symbol, session)).fetchone()
+    assert prev is None or {r[8] for r in rows} == {prev[0]}
+    conn.close()
+
+
+def test_prices_show_full_rupees_and_paise():
+    """As Candles and Calls: the locale unit with 2 decimals (11,053.15), never a currency unit,
+    which Grafana abbreviates above 999 (₹11.1K)."""
+    text = (ROOT / "grafana" / "dashboards" / "01-predicted-picks.json").read_text()
+    assert "currency" not in text
+    d = json.loads(text)
+    for p in d["panels"]:
+        if p["type"] == "candlestick":
+            assert (p["fieldConfig"]["defaults"]["unit"], p["fieldConfig"]["defaults"]["decimals"]) == ("locale", 2)
+    table = next(p for p in d["panels"] if p["type"] == "table")
+    units = {o["matcher"]["options"]: {x["id"]: x["value"] for x in o["properties"]}
+             for o in table["fieldConfig"]["overrides"]}
+    for col in ("Price", "Range low", "Range high", "Entry"):
+        assert units[col] == {"unit": "locale", "decimals": 2}, col
+
+
+def test_predicted_picks_opens_on_todays_trading_hours_with_stock_analyzers_time_options():
+    d = json.loads((ROOT / "grafana" / "dashboards" / "01-predicted-picks.json").read_text())
+    ranges = d["timepicker"]["quick_ranges"]
+    assert ranges[0] == {"display": "Today's trading hours", "from": "now/d+9h+15m", "to": "now"}
+    assert d["time"] == {"from": "now/d+9h+15m", "to": "now"}  # selected by default
+    assert d["weekStart"] == "monday" and d["timezone"] == "Asia/Kolkata"
+    theirs = CONFIG.analyzer_db.parent.parent / "grafana" / "dashboards" / "02-candles-and-calls.json"
+    if theirs.exists():  # the same options, in the same order, as stock-analyzer's Candles and Calls
+        assert ranges == json.loads(theirs.read_text())["timepicker"]["quick_ranges"]
 
 
 @pytest.mark.skipif(not CONFIG.analyzer_db.exists(), reason="needs stock-analyzer's database")
@@ -131,9 +205,13 @@ def test_dashboards_are_consistent_and_up_to_date(tmp_path, monkeypatch):
         ids = [p["id"] for p in d["panels"]]
         assert len(ids) == len(set(ids)), path.name
         assert {u for _, u, _ in _queries(d)} <= uids
-    provisioned = (ROOT / "grafana" / "provisioning" / "datasources" / "sqlite.yaml").read_text()
+    provisioned = (ROOT / "grafana" / "provisioning" / "datasources" / "stock-predictor.yaml").read_text()
     assert "uid: stock-predictor-sqlite" in provisioned and "uid: stock-analyzer-readonly" in provisioned
     assert provisioned.count("query_only(1)") == 2  # neither database can be changed from a dashboard
+    # added to stock-analyzer's Grafana, whose own datasource is the default: Grafana allows only one
+    assert "isDefault: true" not in provisioned and provisioned.count("isDefault: false") == 2
+    folder = (ROOT / "grafana" / "provisioning" / "dashboards" / "stock-predictor.yaml").read_text()
+    assert "folder: Stock Predictor" in folder and "path: __DASHBOARDS__" in folder
 
     spec = importlib.util.spec_from_file_location("make_dashboards", ROOT / "grafana" / "make_dashboards.py")
     mod = importlib.util.module_from_spec(spec)
@@ -144,7 +222,7 @@ def test_dashboards_are_consistent_and_up_to_date(tmp_path, monkeypatch):
         assert (tmp_path / path.name).read_text() == path.read_text(), f"re-run grafana/make_dashboards.py ({path.name})"
 
 
-@pytest.mark.parametrize("script", ["schedule-today.sh", "../grafana/run-local.sh"])
+@pytest.mark.parametrize("script", ["schedule-today.sh", "../grafana/add-to-stock-analyzer.sh"])
 def test_the_new_scripts_parse(script):
     assert subprocess.run(["bash", "-n", str(ROOT / "scripts" / script)]).returncode == 0
 
@@ -169,3 +247,25 @@ def test_held_out_checks_are_kept_in_the_store(tmp_path):
         (e,) = s.evaluations()
         assert e["family"] == "fam" and e["base_hit"] == 0.4  # replaced, not duplicated
         assert json.loads(e["evaluation"])["sessions"] == ["a", "b"]
+
+
+def test_adding_to_stock_analyzers_grafana_writes_two_files_and_removes_them(tmp_path):
+    runtime = tmp_path / "runtime"
+    (runtime / "provisioning" / "datasources").mkdir(parents=True)
+    (runtime / "provisioning" / "dashboards").mkdir(parents=True)
+    (runtime / "provisioning" / "datasources" / "sqlite.yaml").write_text("theirs")  # never touched
+    dbs = tmp_path / "sp.db", tmp_path / "sa.db"
+    for db in dbs:
+        db.write_text("")
+    env = {"PATH": "/usr/bin:/bin", "STOCK_ANALYZER_GRAFANA_RUNTIME": str(runtime),
+           "STOCK_PREDICTOR_DB": str(dbs[0]), "STOCK_ANALYZER_DB": str(dbs[1])}
+    script = str(ROOT / "grafana" / "add-to-stock-analyzer.sh")
+    out = subprocess.run(["bash", script], env=env, capture_output=True, text=True, check=True).stdout
+    assert "Restart stock-analyzer's Grafana" in out  # no password given: nothing is reloaded
+    ds = (runtime / "provisioning" / "datasources" / "stock-predictor.yaml").read_text()
+    folder = (runtime / "provisioning" / "dashboards" / "stock-predictor.yaml").read_text()
+    assert f"path: {dbs[0]}" in ds and f"path: {dbs[1]}" in ds and "__" not in ds
+    assert f"path: {ROOT / 'grafana' / 'dashboards'}" in folder
+    assert (runtime / "provisioning" / "datasources" / "sqlite.yaml").read_text() == "theirs"
+    subprocess.run(["bash", script, "remove"], env=env, capture_output=True, text=True, check=True)
+    assert sorted(p.name for p in (runtime / "provisioning").rglob("*.yaml")) == ["sqlite.yaml"]

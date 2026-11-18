@@ -1,38 +1,53 @@
 # Dashboards
 
-Two dashboards in a "Stock Predictor" folder, on their own Grafana at
-http://localhost:3001, beside stock-analyzer's on 3000. Grafana reads two
-SQLite files in place, through the
+Two dashboards in a **"Stock Predictor" folder in stock-analyzer's Grafana**
+(http://localhost:3000), beside its "Stock Analyzer" folder. There is no
+second Grafana. The dashboards read two SQLite files in place, through the
 [SQLite datasource plugin](https://grafana.com/grafana/plugins/frser-sqlite-datasource/):
 
 - **StockPredictor**: this project's store, `data/stock-predictor.db`. It holds
   what `today.sh` and `tomorrow.sh` recorded at every run, how each prediction
   did once its session closed, and the held-out checks.
 - **StockAnalyzer (read-only)**: stock-analyzer's database, for the actual
-  minute candles.
+  minute candles. This is separate from stock-analyzer's own datasource, so
+  every Stock Predictor panel reads without writing.
 
-Both are opened with `query_only`, so a dashboard can never change either file.
+Both are opened with `query_only`, so a dashboard can never change either
+file. Neither is the default; stock-analyzer's stays the default.
 
-## Run it
+## Add them
+
+Start stock-analyzer's Grafana once with its `grafana/run-local.sh`, then:
 
 ```bash
-./grafana/run-local.sh      # http://localhost:3001, admin/admin
+grafana/add-to-stock-analyzer.sh                             # then restart stock-analyzer's Grafana
+GRAFANA_PASSWORD=<its admin password> grafana/add-to-stock-analyzer.sh   # or: the running one reloads
+grafana/add-to-stock-analyzer.sh status                      # are they there?
+grafana/add-to-stock-analyzer.sh remove                      # take them out again
 ```
 
-It reuses the Grafana build and SQLite plugin that stock-analyzer's
-`grafana/run-local.sh` downloaded, when they exist. Otherwise it downloads
-its own into `grafana/.runtime/`, about 100 MB, once. Its settings and logs
-live in `grafana/.runtime/`; nothing of stock-analyzer's is changed. Delete
-`grafana/.runtime/` to undo everything. Ctrl-C stops it.
+stock-analyzer's `run-local.sh` keeps Grafana's provisioning in its
+`grafana/.runtime/provisioning/`, and on each start it rewrites only its own
+two files there. This script adds two more, both named `stock-predictor.yaml`:
+one for the datasources, and one for the folder, which points at this repo's
+`grafana/dashboards`. Nothing of stock-analyzer's own changes. If its
+`grafana/.runtime/` is ever deleted, run the script again.
 
 The dashboards fill as runs are recorded. `scripts/schedule-today.sh install`
 records a run every 10 minutes from 09:20 to 14:50 on weekdays. The evening
 refresh scores each day's predictions.
 
-## Picks, per stock
+## Predicted Picks
 
 One row of charts for each stock picked in the **Stocks** box. The box lists
-the stocks by chance at the latest run, most likely first.
+the stocks by chance at the latest run, most likely first. You can also pick
+stocks from the **Latest run, every stock** table: click a stock's name and
+choose **Add it to the charts below** (keeps the stocks already picked) or
+**Show only it**. Either fills the Stocks box, keeping the time range and the
+model. To take a stock off, untick it in the Stocks box.
+
+The time picker has the same options as stock-analyzer's **Candles and Calls**
+page, and it opens on **Today's trading hours** (09:15 today to now).
 
 - **Range in price, entry and chance at each run.** Time runs along the
   bottom, with one candle per `today.sh` run:
@@ -45,13 +60,21 @@ the stocks by chance at the latest run, most likely first.
   - The tooltip also shows the *edge*: the chance minus the base rate, in
     points.
 - **What the price did.** stock-analyzer's minute candles over the same time.
-  Did the price reach the range?
+  Did the price reach the range? As on stock-analyzer's Candles and Calls,
+  hovering shows Open, Close, High, Low and Volume, then:
+  - **EMA 10m** (yellow) and **EMA 60m** (blue): exponential moving averages
+    of the minute closes. Each restarts at its session's first close and
+    appears once its 10 or 60 minutes have passed.
+  - **Previous day's close** (dotted): the close of the session before.
+
+  Candles and Calls itself draws simple averages (SMA).
 - **Green markers** on both charts are runs where the stock was flagged, at
   10 or more points above the base rate.
 
 Above the rows are:
 - the latest run's base rate, and how many stocks were flagged or had 50%+;
-- every stock at the latest run, with the same columns as `today.sh`;
+- every stock at the latest run, with the same columns as `today.sh` (click a
+  name to chart it);
 - the flagged count and the base rate, run by run.
 
 The **Model** box switches between `today.sh`'s models. Pick
