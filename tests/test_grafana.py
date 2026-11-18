@@ -128,6 +128,30 @@ def test_clicking_a_stock_in_the_latest_run_sets_the_stocks_box():
     assert {"family", "symbol"} <= names
 
 
+def test_each_stocks_row_links_to_its_stock_analyzer_pages():
+    d = json.loads((ROOT / "grafana" / "dashboards" / "01-predicted-picks.json").read_text())
+    i = next(i for i, p in enumerate(d["panels"]) if p.get("repeat") == "symbol")
+    bar = d["panels"][i + 1]  # first in the row, so it repeats with it, above the charts
+    assert bar["type"] == "text" and bar["gridPos"]["y"] == d["panels"][i]["gridPos"]["y"] + 1
+    assert all(p["gridPos"]["y"] > bar["gridPos"]["y"] for p in d["panels"][i + 2:])
+    links = re.findall(r"\[([^\]]+)\]\(([^)]+)\)", bar["options"]["content"])
+    assert [t for t, _ in links] == ["Company Details", "CAN SLIM", "Stock Trend"]
+    for _, url in links:
+        # this row's stock, percent-encoded so M&M stays one stock; their own time range, not this one's
+        assert url.endswith("?var-symbol=${symbol:percentencode}") and "__url_time_range" not in url
+    theirs = CONFIG.analyzer_db.parent.parent / "grafana" / "dashboards"
+    if theirs.exists():  # each link names one of stock-analyzer's dashboards, which picks a single stock
+        pages = {}
+        for f in theirs.glob("*.json"):
+            sa = json.loads(f.read_text())
+            pages[f"/d/{sa['uid']}/{sa['title'].lower().replace(' ', '-')}"] = sa
+        for title, url in links:
+            sa = pages[url.split("?")[0]]
+            assert sa["title"] == title
+            symbol = next(v for v in sa["templating"]["list"] if v["name"] == "symbol")
+            assert not symbol.get("multi")
+
+
 @pytest.mark.skipif(not CONFIG.analyzer_db.exists(), reason="needs stock-analyzer's database")
 def test_the_minute_candles_tooltip_has_ohlc_volume_emas_and_the_previous_close():
     from stock_predictor.data.analyzer import _connect_read_only

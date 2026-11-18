@@ -28,6 +28,13 @@ PRICE = {"unit": "locale", "decimals": 2}
 IN_RANGE = "as_of BETWEEN $__from / 1000 AND $__to / 1000"
 # The first dashboard keeps its uid, so links and bookmarks made before it was renamed still open it.
 PICKS_UID, PICKS_SLUG = "stockpredictor-picks", "predicted-picks"
+# stock-analyzer's per-stock dashboards, linked from each stock's row: (title, uid, slug). Each picks its
+# stock with a single-value `symbol` variable, and every symbol today.sh scores is in their lists.
+ANALYZER_PAGES = [
+    ("Company Details", "stockanalyzer-company", "company-details"),
+    ("CAN SLIM", "stockanalyzer-canslim", "can-slim"),
+    ("Stock Trend", "stockanalyzer-trend", "stock-trend"),
+]
 # The time picker's options, exactly as stock-analyzer's Candles and Calls dashboard has them
 # (grafana/dashboards/02-candles-and-calls.json there). The first is Predicted Picks' default.
 QUICK_RANGES = [
@@ -235,6 +242,16 @@ GROUP BY as_of ORDER BY as_of""")],
     # One row per stock picked in the Stocks box: the prediction at each run, and what the price did.
     lay.add({"type": "row", "title": "$symbol", "collapsed": False, "repeat": "symbol", "panels": []}, 0, y, 24, 1)
     y += 1
+    # The stock in stock-analyzer's own dashboards. Their own time ranges, not this one: today's
+    # trading hours would leave Stock Trend's daily candles all but empty.
+    links = " · ".join(f"[{title}](/d/{uid}/{slug}?var-symbol=${{symbol:percentencode}})"
+                       for title, uid, slug in ANALYZER_PAGES)
+    lay.add({"type": "text", "title": "", "transparent": True,
+             "description": "The same stock in stock-analyzer's dashboards, each over its own default time range. "
+                            "Use the browser's Back button to return here.",
+             "options": {"mode": "markdown", "content": f"**$symbol** in Stock Analyzer: {links}"}},
+            0, y, 24, 2)
+    y += 2
     lay.add({
         "type": "candlestick", "title": "$symbol: Range in price, entry and chance at each run", "datasource": SP,
         "description": "One candle per today.sh run (time along the bottom). The candle spans the **Range in price**: "
