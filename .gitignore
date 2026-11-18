@@ -16,3 +16,4 @@ artifacts/
 *.parquet
 data/logs/
 .DS_Store
+grafana/.runtime/

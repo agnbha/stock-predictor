@@ -1,0 +1,922 @@
+{
+ "uid": "stockpredictor-picks",
+ "title": "Picks, per stock",
+ "description": "What today.sh said about each stock at every run (the Range in price, the entry price and the chance), and what the price did. Runs come from summary --record, which today.sh and schedule-today.sh do by default.",
+ "tags": [
+  "stock-predictor"
+ ],
+ "timezone": "Asia/Kolkata",
+ "editable": true,
+ "graphTooltip": 1,
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "1m",
+ "time": {
+  "from": "now/d",
+  "to": "now/d"
+ },
+ "annotations": {
+  "list": [
+   {
+    "builtIn": 1,
+    "datasource": {
+     "type": "grafana",
+     "uid": "-- Grafana --"
+    },
+    "enable": true,
+    "hide": true,
+    "iconColor": "rgba(0, 211, 255, 1)",
+    "name": "Annotations & Alerts",
+    "type": "dashboard"
+   },
+   {
+    "datasource": {
+     "type": "frser-sqlite-datasource",
+     "uid": "stock-predictor-sqlite"
+    },
+    "enable": true,
+    "iconColor": "#73BF69",
+    "name": "Flagged",
+    "target": {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT as_of AS time,\n       symbol || ' flagged: chance ' || printf('%.0f%%', chance * 100)\n         || ', edge ' || printf('%+.0f', (chance - base_rate) * 100) || ' points' AS text,\n       symbol AS tags\nFROM summary_pick\nWHERE kind = 'today' AND model_version LIKE '${family}/%' AND flagged = 1 AND symbol IN (${symbol:sqlstring}) AND as_of BETWEEN $__from / 1000 AND $__to / 1000",
+     "rawQueryText": "SELECT as_of AS time,\n       symbol || ' flagged: chance ' || printf('%.0f%%', chance * 100)\n         || ', edge ' || printf('%+.0f', (chance - base_rate) * 100) || ' points' AS text,\n       symbol AS tags\nFROM summary_pick\nWHERE kind = 'today' AND model_version LIKE '${family}/%' AND flagged = 1 AND symbol IN (${symbol:sqlstring}) AND as_of BETWEEN $__from / 1000 AND $__to / 1000",
+     "queryType": "table",
+     "timeColumns": [
+      "time"
+     ]
+    }
+   }
+  ]
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "family",
+    "label": "Model",
+    "type": "query",
+    "datasource": {
+     "type": "frser-sqlite-datasource",
+     "uid": "stock-predictor-sqlite"
+    },
+    "query": "SELECT DISTINCT substr(model_version, 1, instr(model_version, '/') - 1) FROM summary_pick WHERE kind = 'today' ORDER BY 1",
+    "definition": "SELECT DISTINCT substr(model_version, 1, instr(model_version, '/') - 1) FROM summary_pick WHERE kind = 'today' ORDER BY 1",
+    "refresh": 2,
+    "sort": 0,
+    "includeAll": false,
+    "multi": false,
+    "description": "Which today.sh model's runs to show: sklearn-target-0.5pct-close is the default (+0.5% at some point before the close); ...-stop0.5pct-close is today.sh --stop 0.5 (+0.5% before it falls 0.5%).",
+    "current": {
+     "selected": false,
+     "text": "",
+     "value": ""
+    }
+   },
+   {
+    "name": "symbol",
+    "label": "Stocks",
+    "type": "query",
+    "datasource": {
+     "type": "frser-sqlite-datasource",
+     "uid": "stock-predictor-sqlite"
+    },
+    "query": "SELECT symbol FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of = (SELECT MAX(as_of) FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of BETWEEN $__from / 1000 AND $__to / 1000) ORDER BY chance DESC",
+    "definition": "SELECT symbol FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of = (SELECT MAX(as_of) FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of BETWEEN $__from / 1000 AND $__to / 1000) ORDER BY chance DESC",
+    "refresh": 2,
+    "sort": 0,
+    "includeAll": false,
+    "multi": true,
+    "description": "One chart per stock, listed by chance at the latest run in the time range (the first is the most likely). Tick several to compare them.",
+    "current": {
+     "selected": false,
+     "text": "",
+     "value": ""
+    }
+   }
+  ]
+ },
+ "panels": [
+  {
+   "id": 1,
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 6,
+    "h": 4
+   },
+   "type": "stat",
+   "title": "Latest run",
+   "description": "The minute of the latest recorded today.sh run in the time range (schedule-today.sh runs it every 10 minutes, 09:20 to 14:50).",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT MAX(as_of) * 1000 AS \"Latest run\" FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of BETWEEN $__from / 1000 AND $__to / 1000",
+     "rawQueryText": "SELECT MAX(as_of) * 1000 AS \"Latest run\" FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of BETWEEN $__from / 1000 AND $__to / 1000",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "dateTimeAsLocal",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "blue"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   }
+  },
+  {
+   "id": 2,
+   "gridPos": {
+    "x": 6,
+    "y": 0,
+    "w": 6,
+    "h": 4
+   },
+   "type": "stat",
+   "title": "Base rate now",
+   "description": "How often any stock reached the target from this time of day in the held-out month. A chance near it says nothing.",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT MAX(base_rate) * 100 AS \"Base rate\" FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of = (SELECT MAX(as_of) FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of BETWEEN $__from / 1000 AND $__to / 1000)",
+     "rawQueryText": "SELECT MAX(base_rate) * 100 AS \"Base rate\" FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of = (SELECT MAX(as_of) FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of BETWEEN $__from / 1000 AND $__to / 1000)",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "blue"
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   }
+  },
+  {
+   "id": 3,
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 6,
+    "h": 4
+   },
+   "type": "stat",
+   "title": "Flagged now",
+   "description": "Stocks whose chance is 10+ points above the base rate at the latest run.",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT COALESCE(SUM(flagged), 0) AS \"Flagged\" FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of = (SELECT MAX(as_of) FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of BETWEEN $__from / 1000 AND $__to / 1000)",
+     "rawQueryText": "SELECT COALESCE(SUM(flagged), 0) AS \"Flagged\" FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of = (SELECT MAX(as_of) FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of BETWEEN $__from / 1000 AND $__to / 1000)",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "green"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   }
+  },
+  {
+   "id": 4,
+   "gridPos": {
+    "x": 18,
+    "y": 0,
+    "w": 6,
+    "h": 4
+   },
+   "type": "stat",
+   "title": "50%+ now",
+   "description": "Stocks with a chance of 50% or more at the latest run.",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT COALESCE(SUM(passed), 0) AS \"50%+\" FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of = (SELECT MAX(as_of) FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of BETWEEN $__from / 1000 AND $__to / 1000)",
+     "rawQueryText": "SELECT COALESCE(SUM(passed), 0) AS \"50%+\" FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of = (SELECT MAX(as_of) FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of BETWEEN $__from / 1000 AND $__to / 1000)",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "blue"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   }
+  },
+  {
+   "id": 5,
+   "gridPos": {
+    "x": 0,
+    "y": 4,
+    "w": 15,
+    "h": 12
+   },
+   "type": "table",
+   "title": "Latest run, every stock",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "description": "Every stock at the latest run, most likely first. Edge is the chance minus the base rate, in points; ✓ marks a stock 10+ points above it. Range in price is the p25-p75 of the best price expected later today; Entry is the most to pay, 0.6% below its low end (or the price then).",
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT rank AS \"#\", symbol AS \"Stock\", price AS \"Price\", chance * 100 AS \"Chance\",\n       CASE WHEN base_rate IS NULL THEN NULL ELSE (chance - base_rate) * 100 END AS \"Edge\",\n       CASE WHEN flagged = 1 THEN '✓' ELSE '' END AS \"Flag\",\n       gain_p50 AS \"Median gain\",\n       price * (1 + gain_p25 / 100.0) AS \"Range low\", price * (1 + gain_p75 / 100.0) AS \"Range high\",\n       MIN(price, price * (1 + gain_p25 / 100.0) * (1 - 0.6 / 100.0)) AS \"Entry\"\nFROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of = (SELECT MAX(as_of) FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of BETWEEN $__from / 1000 AND $__to / 1000)\nORDER BY rank",
+     "rawQueryText": "SELECT rank AS \"#\", symbol AS \"Stock\", price AS \"Price\", chance * 100 AS \"Chance\",\n       CASE WHEN base_rate IS NULL THEN NULL ELSE (chance - base_rate) * 100 END AS \"Edge\",\n       CASE WHEN flagged = 1 THEN '✓' ELSE '' END AS \"Flag\",\n       gain_p50 AS \"Median gain\",\n       price * (1 + gain_p25 / 100.0) AS \"Range low\", price * (1 + gain_p75 / 100.0) AS \"Range high\",\n       MIN(price, price * (1 + gain_p25 / 100.0) * (1 - 0.6 / 100.0)) AS \"Entry\"\nFROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of = (SELECT MAX(as_of) FROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of BETWEEN $__from / 1000 AND $__to / 1000)\nORDER BY rank",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     },
+     "decimals": 2
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "#"
+      },
+      "properties": [
+       {
+        "id": "decimals",
+        "value": 0
+       },
+       {
+        "id": "custom.width",
+        "value": 50
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Chance"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "gauge",
+         "mode": "basic"
+        }
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "max",
+        "value": 100
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Edge"
+      },
+      "properties": [
+       {
+        "id": "decimals",
+        "value": 0
+       },
+       {
+        "id": "custom.cellOptions",
+        "value": {
+         "type": "color-text"
+        }
+       },
+       {
+        "id": "thresholds",
+        "value": {
+         "mode": "absolute",
+         "steps": [
+          {
+           "color": "text",
+           "value": null
+          },
+          {
+           "color": "green",
+           "value": 10
+          }
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Median gain"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Flag"
+      },
+      "properties": [
+       {
+        "id": "custom.width",
+        "value": 60
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   }
+  },
+  {
+   "id": 6,
+   "gridPos": {
+    "x": 15,
+    "y": 4,
+    "w": 9,
+    "h": 12
+   },
+   "type": "timeseries",
+   "title": "Flagged stocks and the base rate, run by run",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "description": "At each run: how many stocks were flagged (10+ points above the base rate) and how many had 50%+, and the base rate itself. The base rate falls through the day, as less of it is left.",
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT as_of AS time, SUM(flagged) AS \"Flagged\", SUM(passed) AS \"50%+\", MAX(base_rate) * 100 AS \"Base rate\"\nFROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of BETWEEN $__from / 1000 AND $__to / 1000\nGROUP BY as_of ORDER BY as_of",
+     "rawQueryText": "SELECT as_of AS time, SUM(flagged) AS \"Flagged\", SUM(passed) AS \"50%+\", MAX(base_rate) * 100 AS \"Base rate\"\nFROM summary_pick WHERE kind = 'today' AND model_version LIKE '${family}/%' AND as_of BETWEEN $__from / 1000 AND $__to / 1000\nGROUP BY as_of ORDER BY as_of",
+     "queryType": "table",
+     "timeColumns": [
+      "time"
+     ]
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "pointSize": 5,
+      "showPoints": "always",
+      "spanNulls": false
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Base rate"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "max",
+        "value": 100
+       },
+       {
+        "id": "custom.axisPlacement",
+        "value": "right"
+       },
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "purple"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Flagged"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       },
+       {
+        "id": "custom.drawStyle",
+        "value": "bars"
+       },
+       {
+        "id": "custom.fillOpacity",
+        "value": 50
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "50%+"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 7,
+   "gridPos": {
+    "x": 0,
+    "y": 16,
+    "w": 24,
+    "h": 1
+   },
+   "type": "row",
+   "title": "$symbol",
+   "collapsed": false,
+   "repeat": "symbol",
+   "panels": []
+  },
+  {
+   "id": 8,
+   "gridPos": {
+    "x": 0,
+    "y": 17,
+    "w": 14,
+    "h": 11
+   },
+   "type": "candlestick",
+   "title": "$symbol: Range in price, entry and chance at each run",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "description": "One candle per today.sh run (time along the bottom). The candle spans the **Range in price**: the p25 to p75 of the best price expected later today. The orange line is the **Entry price** (the most to pay: 0.6% below the range's low end, or the price then). The bars, on the right axis, are the **chance** of the target at that run. The dashed line is the price at the run. Green markers: runs where the stock was flagged.",
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT as_of AS time,\n       price * (1 + gain_p25 / 100.0) AS open,\n       price * (1 + gain_p75 / 100.0) AS high,\n       price * (1 + gain_p25 / 100.0) AS low,\n       price * (1 + gain_p75 / 100.0) AS close,\n       MIN(price, price * (1 + gain_p25 / 100.0) * (1 - 0.6 / 100.0)) AS \"Entry price\",\n       chance * 100 AS \"Chance\",\n       price AS \"Price then\",\n       CASE WHEN base_rate IS NULL THEN NULL ELSE (chance - base_rate) * 100 END AS \"Edge\"\nFROM summary_pick\nWHERE kind = 'today' AND model_version LIKE '${family}/%' AND symbol = '${symbol}' AND as_of BETWEEN $__from / 1000 AND $__to / 1000\nORDER BY as_of",
+     "rawQueryText": "SELECT as_of AS time,\n       price * (1 + gain_p25 / 100.0) AS open,\n       price * (1 + gain_p75 / 100.0) AS high,\n       price * (1 + gain_p25 / 100.0) AS low,\n       price * (1 + gain_p75 / 100.0) AS close,\n       MIN(price, price * (1 + gain_p25 / 100.0) * (1 - 0.6 / 100.0)) AS \"Entry price\",\n       chance * 100 AS \"Chance\",\n       price AS \"Price then\",\n       CASE WHEN base_rate IS NULL THEN NULL ELSE (chance - base_rate) * 100 END AS \"Edge\"\nFROM summary_pick\nWHERE kind = 'today' AND model_version LIKE '${family}/%' AND symbol = '${symbol}' AND as_of BETWEEN $__from / 1000 AND $__to / 1000\nORDER BY as_of",
+     "queryType": "table",
+     "timeColumns": [
+      "time"
+     ]
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "currencyINR",
+     "decimals": 2,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 0,
+      "axisPlacement": "left",
+      "axisLabel": "Price"
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "open"
+      },
+      "properties": [
+       {
+        "id": "displayName",
+        "value": "Range low (p25)"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "close"
+      },
+      "properties": [
+       {
+        "id": "displayName",
+        "value": "Range high (p75)"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "high"
+      },
+      "properties": [
+       {
+        "id": "custom.hideFrom",
+        "value": {
+         "viz": false,
+         "legend": true,
+         "tooltip": true
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "low"
+      },
+      "properties": [
+       {
+        "id": "custom.hideFrom",
+        "value": {
+         "viz": false,
+         "legend": true,
+         "tooltip": true
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Entry price"
+      },
+      "properties": [
+       {
+        "id": "custom.lineWidth",
+        "value": 2
+       },
+       {
+        "id": "custom.showPoints",
+        "value": "always"
+       },
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "orange"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Chance"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "percent"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       },
+       {
+        "id": "min",
+        "value": 0
+       },
+       {
+        "id": "max",
+        "value": 100
+       },
+       {
+        "id": "custom.drawStyle",
+        "value": "bars"
+       },
+       {
+        "id": "custom.fillOpacity",
+        "value": 35
+       },
+       {
+        "id": "custom.lineWidth",
+        "value": 1
+       },
+       {
+        "id": "custom.axisPlacement",
+        "value": "right"
+       },
+       {
+        "id": "custom.axisLabel",
+        "value": "Chance"
+       },
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Price then"
+      },
+      "properties": [
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          4,
+          4
+         ]
+        }
+       },
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "text"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Edge"
+      },
+      "properties": [
+       {
+        "id": "custom.hideFrom",
+        "value": {
+         "viz": true,
+         "legend": true,
+         "tooltip": false
+        }
+       },
+       {
+        "id": "unit",
+        "value": "none"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       },
+       {
+        "id": "displayName",
+        "value": "Edge (points)"
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "mode": "candles",
+    "candleStyle": "candles",
+    "colorStrategy": "open-close",
+    "colors": {
+     "up": "green",
+     "down": "red"
+    },
+    "includeAllFields": true,
+    "fields": {
+     "open": "open",
+     "high": "high",
+     "low": "low",
+     "close": "close"
+    },
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 9,
+   "gridPos": {
+    "x": 14,
+    "y": 17,
+    "w": 10,
+    "h": 11
+   },
+   "type": "candlestick",
+   "title": "$symbol: what the price did (minute candles)",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-analyzer-readonly"
+   },
+   "description": "stock-analyzer's one-minute candles for the same time range, read without writing to its database; the candle still forming is left out. Compare with the predicted range on the left: did the price get there? Green markers: runs where the stock was flagged.",
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-analyzer-readonly"
+     },
+     "refId": "A",
+     "queryText": "SELECT ts_epoch AS time, open, high, low, close, volume\nFROM v_intraday_merged\nWHERE symbol = '${symbol}' AND ts_epoch BETWEEN $__from / 1000 AND $__to / 1000\n  AND COALESCE(source, '') != 'forming'\nORDER BY ts_epoch",
+     "rawQueryText": "SELECT ts_epoch AS time, open, high, low, close, volume\nFROM v_intraday_merged\nWHERE symbol = '${symbol}' AND ts_epoch BETWEEN $__from / 1000 AND $__to / 1000\n  AND COALESCE(source, '') != 'forming'\nORDER BY ts_epoch",
+     "queryType": "table",
+     "timeColumns": [
+      "time"
+     ]
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "currencyINR",
+     "decimals": 2,
+     "custom": {}
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "volume"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "mode": "candles+volume",
+    "candleStyle": "candles",
+    "colorStrategy": "open-close",
+    "colors": {
+     "up": "green",
+     "down": "red"
+    },
+    "includeAllFields": false,
+    "legend": {
+     "showLegend": false,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   }
+  }
+ ]
+}
