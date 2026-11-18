@@ -1,0 +1,887 @@
+{
+ "uid": "stockpredictor-scorecard",
+ "title": "How the picks did",
+ "description": "The recorded picks, scored after each session, and the held-out check behind the chances.",
+ "tags": [
+  "stock-predictor"
+ ],
+ "timezone": "Asia/Kolkata",
+ "editable": true,
+ "graphTooltip": 1,
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "5m",
+ "time": {
+  "from": "now-30d",
+  "to": "now"
+ },
+ "annotations": {
+  "list": [
+   {
+    "builtIn": 1,
+    "datasource": {
+     "type": "grafana",
+     "uid": "-- Grafana --"
+    },
+    "enable": true,
+    "hide": true,
+    "iconColor": "rgba(0, 211, 255, 1)",
+    "name": "Annotations & Alerts",
+    "type": "dashboard"
+   }
+  ]
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "family",
+    "label": "Model",
+    "type": "query",
+    "datasource": {
+     "type": "frser-sqlite-datasource",
+     "uid": "stock-predictor-sqlite"
+    },
+    "query": "SELECT DISTINCT substr(model_version, 1, instr(model_version, '/') - 1) FROM summary_pick ORDER BY 1",
+    "definition": "SELECT DISTINCT substr(model_version, 1, instr(model_version, '/') - 1) FROM summary_pick ORDER BY 1",
+    "refresh": 2,
+    "sort": 0,
+    "includeAll": false,
+    "multi": false,
+    "description": "Which model's recorded picks and held-out check to show. sklearn-nextday-... is tomorrow.sh.",
+    "current": {
+     "selected": false,
+     "text": "",
+     "value": ""
+    }
+   }
+  ]
+ },
+ "panels": [
+  {
+   "id": 1,
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 3
+   },
+   "type": "text",
+   "title": "",
+   "options": {
+    "mode": "markdown",
+    "content": "**How the recorded picks did.** A pick is scored once its session has closed (the evening refresh, or `stock-predictor scorecard`). *Reached* means the price got to the target after the run (for tomorrow.sh, above the next open; with a stop, before the stop). The **held-out check** below is the month a twin of the model was tested on without having seen it."
+   }
+  },
+  {
+   "id": 2,
+   "gridPos": {
+    "x": 0,
+    "y": 3,
+    "w": 14,
+    "h": 9
+   },
+   "type": "barchart",
+   "title": "Reached the target, by session",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "description": "For each scored session, across every recorded run: the share that reached the target among flagged stocks, stocks with 50%+, each run's top 5, and every stock.",
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT session_date AS \"Session\",\n       100.0 * SUM(CASE WHEN flagged = 1 THEN hit END) / NULLIF(SUM(flagged = 1), 0) AS \"Flagged\",\n       100.0 * SUM(CASE WHEN passed = 1 THEN hit END) / NULLIF(SUM(passed = 1), 0) AS \"50%+\",\n       100.0 * SUM(CASE WHEN rank <= 5 THEN hit END) / NULLIF(SUM(rank <= 5), 0) AS \"Top 5\",\n       100.0 * AVG(hit) AS \"Every stock\"\nFROM summary_pick WHERE model_version LIKE '${family}/%' AND scored_at IS NOT NULL AND session_date BETWEEN date($__from / 1000, 'unixepoch', '+5 hours', '+30 minutes') AND date($__to / 1000, 'unixepoch', '+5 hours', '+30 minutes')\nGROUP BY session_date ORDER BY session_date",
+     "rawQueryText": "SELECT session_date AS \"Session\",\n       100.0 * SUM(CASE WHEN flagged = 1 THEN hit END) / NULLIF(SUM(flagged = 1), 0) AS \"Flagged\",\n       100.0 * SUM(CASE WHEN passed = 1 THEN hit END) / NULLIF(SUM(passed = 1), 0) AS \"50%+\",\n       100.0 * SUM(CASE WHEN rank <= 5 THEN hit END) / NULLIF(SUM(rank <= 5), 0) AS \"Top 5\",\n       100.0 * AVG(hit) AS \"Every stock\"\nFROM summary_pick WHERE model_version LIKE '${family}/%' AND scored_at IS NOT NULL AND session_date BETWEEN date($__from / 1000, 'unixepoch', '+5 hours', '+30 minutes') AND date($__to / 1000, 'unixepoch', '+5 hours', '+30 minutes')\nGROUP BY session_date ORDER BY session_date",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "decimals": 0,
+     "custom": {
+      "fillOpacity": 70
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Flagged"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "50%+"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Top 5"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "orange"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Every stock"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "text"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "xField": "Session",
+    "orientation": "vertical",
+    "groupWidth": 0.7,
+    "barWidth": 0.9,
+    "showValue": "auto",
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 3,
+   "gridPos": {
+    "x": 14,
+    "y": 3,
+    "w": 10,
+    "h": 9
+   },
+   "type": "table",
+   "title": "Sessions",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "description": "Runs, scored stock-predictions, flagged ones and how many reached the target.",
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT session_date AS \"Session\", COUNT(DISTINCT as_of) AS \"Runs\", COUNT(*) AS \"Scored\",\n       SUM(flagged = 1) AS \"Flagged\", SUM(CASE WHEN flagged = 1 THEN hit ELSE 0 END) AS \"Flagged reached\",\n       100.0 * AVG(hit) AS \"Every stock %\", 100.0 * AVG(base_rate) AS \"Base rate %\"\nFROM summary_pick WHERE model_version LIKE '${family}/%' AND scored_at IS NOT NULL AND session_date BETWEEN date($__from / 1000, 'unixepoch', '+5 hours', '+30 minutes') AND date($__to / 1000, 'unixepoch', '+5 hours', '+30 minutes')\nGROUP BY session_date ORDER BY session_date DESC",
+     "rawQueryText": "SELECT session_date AS \"Session\", COUNT(DISTINCT as_of) AS \"Runs\", COUNT(*) AS \"Scored\",\n       SUM(flagged = 1) AS \"Flagged\", SUM(CASE WHEN flagged = 1 THEN hit ELSE 0 END) AS \"Flagged reached\",\n       100.0 * AVG(hit) AS \"Every stock %\", 100.0 * AVG(base_rate) AS \"Base rate %\"\nFROM summary_pick WHERE model_version LIKE '${family}/%' AND scored_at IS NOT NULL AND session_date BETWEEN date($__from / 1000, 'unixepoch', '+5 hours', '+30 minutes') AND date($__to / 1000, 'unixepoch', '+5 hours', '+30 minutes')\nGROUP BY session_date ORDER BY session_date DESC",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm"
+   }
+  },
+  {
+   "id": 4,
+   "gridPos": {
+    "x": 0,
+    "y": 12,
+    "w": 12,
+    "h": 9
+   },
+   "type": "barchart",
+   "title": "Chance against what happened",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "description": "Scored predictions grouped by the chance given: how often they reached the target. A model whose chances can be taken at face value has its bars near the diagonal (a 60-70% group reaching it about 65% of the time).",
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT printf('%d-%d%%', CAST(chance * 10 AS INTEGER) * 10, CAST(chance * 10 AS INTEGER) * 10 + 10) AS \"Chance given\",\n       100.0 * AVG(hit) AS \"Reached\", 100.0 * AVG(chance) AS \"Said\", COUNT(*) AS \"Predictions\"\nFROM summary_pick WHERE model_version LIKE '${family}/%' AND scored_at IS NOT NULL AND session_date BETWEEN date($__from / 1000, 'unixepoch', '+5 hours', '+30 minutes') AND date($__to / 1000, 'unixepoch', '+5 hours', '+30 minutes')\nGROUP BY CAST(chance * 10 AS INTEGER) ORDER BY CAST(chance * 10 AS INTEGER)",
+     "rawQueryText": "SELECT printf('%d-%d%%', CAST(chance * 10 AS INTEGER) * 10, CAST(chance * 10 AS INTEGER) * 10 + 10) AS \"Chance given\",\n       100.0 * AVG(hit) AS \"Reached\", 100.0 * AVG(chance) AS \"Said\", COUNT(*) AS \"Predictions\"\nFROM summary_pick WHERE model_version LIKE '${family}/%' AND scored_at IS NOT NULL AND session_date BETWEEN date($__from / 1000, 'unixepoch', '+5 hours', '+30 minutes') AND date($__to / 1000, 'unixepoch', '+5 hours', '+30 minutes')\nGROUP BY CAST(chance * 10 AS INTEGER) ORDER BY CAST(chance * 10 AS INTEGER)",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "decimals": 0
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Predictions"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       },
+       {
+        "id": "custom.hideFrom",
+        "value": {
+         "viz": true,
+         "legend": true,
+         "tooltip": false
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Said"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "text"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Reached"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "blue"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "xField": "Chance given",
+    "orientation": "vertical",
+    "showValue": "auto",
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 5,
+   "gridPos": {
+    "x": 12,
+    "y": 12,
+    "w": 12,
+    "h": 9
+   },
+   "type": "barchart",
+   "title": "Edge against what happened (live)",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "description": "Scored predictions grouped by edge (chance minus the base rate, in points): how often they reached the target, against the base rate for the same predictions. The held-out version of this is below.",
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT CASE WHEN e < 0 THEN 'below 0' WHEN e < 5 THEN '0 to +5' WHEN e < 10 THEN '+5 to +10'\n            WHEN e < 15 THEN '+10 to +15' WHEN e < 20 THEN '+15 to +20' ELSE '+20 or more' END AS \"Edge\",\n       100.0 * AVG(hit) AS \"Reached\", 100.0 * AVG(base_rate) AS \"Base rate\", COUNT(*) AS \"Predictions\"\nFROM (SELECT ROUND((chance - base_rate) * 100, 6) AS e, hit, base_rate FROM summary_pick\n      WHERE model_version LIKE '${family}/%' AND scored_at IS NOT NULL AND session_date BETWEEN date($__from / 1000, 'unixepoch', '+5 hours', '+30 minutes') AND date($__to / 1000, 'unixepoch', '+5 hours', '+30 minutes') AND base_rate IS NOT NULL)\nGROUP BY 1 ORDER BY MIN(e)",
+     "rawQueryText": "SELECT CASE WHEN e < 0 THEN 'below 0' WHEN e < 5 THEN '0 to +5' WHEN e < 10 THEN '+5 to +10'\n            WHEN e < 15 THEN '+10 to +15' WHEN e < 20 THEN '+15 to +20' ELSE '+20 or more' END AS \"Edge\",\n       100.0 * AVG(hit) AS \"Reached\", 100.0 * AVG(base_rate) AS \"Base rate\", COUNT(*) AS \"Predictions\"\nFROM (SELECT ROUND((chance - base_rate) * 100, 6) AS e, hit, base_rate FROM summary_pick\n      WHERE model_version LIKE '${family}/%' AND scored_at IS NOT NULL AND session_date BETWEEN date($__from / 1000, 'unixepoch', '+5 hours', '+30 minutes') AND date($__to / 1000, 'unixepoch', '+5 hours', '+30 minutes') AND base_rate IS NOT NULL)\nGROUP BY 1 ORDER BY MIN(e)",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "decimals": 0
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Predictions"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       },
+       {
+        "id": "custom.hideFrom",
+        "value": {
+         "viz": true,
+         "legend": true,
+         "tooltip": false
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Base rate"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "text"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Reached"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "xField": "Edge",
+    "orientation": "vertical",
+    "showValue": "auto",
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 6,
+   "gridPos": {
+    "x": 0,
+    "y": 21,
+    "w": 24,
+    "h": 10
+   },
+   "type": "table",
+   "title": "Track record per stock",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "description": "Per stock, over the scored sessions in the time range: how often a run gave it 50%+ and it then reached the target, the same for flagged, and how often the call (yes at 50%+, else no) was right.",
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT symbol AS \"Stock\", COUNT(*) AS \"Checks\",\n       SUM(passed = 1) AS \"Said 50%+\", SUM(CASE WHEN passed = 1 THEN hit ELSE 0 END) AS \"…and reached\",\n       SUM(flagged = 1) AS \"Flagged\", SUM(CASE WHEN flagged = 1 THEN hit ELSE 0 END) AS \"…reached \",\n       100.0 * AVG(hit) AS \"Reached at all %\",\n       100.0 * AVG(CASE WHEN (passed = 1) = (hit = 1) THEN 1.0 ELSE 0.0 END) AS \"Right %\"\nFROM summary_pick WHERE model_version LIKE '${family}/%' AND scored_at IS NOT NULL AND session_date BETWEEN date($__from / 1000, 'unixepoch', '+5 hours', '+30 minutes') AND date($__to / 1000, 'unixepoch', '+5 hours', '+30 minutes')\nGROUP BY symbol ORDER BY SUM(flagged = 1) DESC, SUM(passed = 1) DESC, symbol",
+     "rawQueryText": "SELECT symbol AS \"Stock\", COUNT(*) AS \"Checks\",\n       SUM(passed = 1) AS \"Said 50%+\", SUM(CASE WHEN passed = 1 THEN hit ELSE 0 END) AS \"…and reached\",\n       SUM(flagged = 1) AS \"Flagged\", SUM(CASE WHEN flagged = 1 THEN hit ELSE 0 END) AS \"…reached \",\n       100.0 * AVG(hit) AS \"Reached at all %\",\n       100.0 * AVG(CASE WHEN (passed = 1) = (hit = 1) THEN 1.0 ELSE 0.0 END) AS \"Right %\"\nFROM summary_pick WHERE model_version LIKE '${family}/%' AND scored_at IS NOT NULL AND session_date BETWEEN date($__from / 1000, 'unixepoch', '+5 hours', '+30 minutes') AND date($__to / 1000, 'unixepoch', '+5 hours', '+30 minutes')\nGROUP BY symbol ORDER BY SUM(flagged = 1) DESC, SUM(passed = 1) DESC, symbol",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "decimals": 0,
+     "custom": {
+      "filterable": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm"
+   }
+  },
+  {
+   "id": 7,
+   "gridPos": {
+    "x": 0,
+    "y": 31,
+    "w": 24,
+    "h": 1
+   },
+   "type": "row",
+   "title": "The held-out check: a twin of the model, tested on a month it had not seen",
+   "collapsed": false,
+   "panels": []
+  },
+  {
+   "id": 8,
+   "gridPos": {
+    "x": 0,
+    "y": 32,
+    "w": 6,
+    "h": 4
+   },
+   "type": "stat",
+   "title": "Any stock",
+   "description": "From the latest held-out check of this model: how often each set reached the target (the net is after costs, selling at the target or the close).",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT base_hit AS \"Any stock\" FROM model_evaluation WHERE family = '${family}' AND model_version = (SELECT model_version FROM model_evaluation WHERE family = '${family}' ORDER BY sessions_to DESC, recorded_at DESC LIMIT 1)",
+     "rawQueryText": "SELECT base_hit AS \"Any stock\" FROM model_evaluation WHERE family = '${family}' AND model_version = (SELECT model_version FROM model_evaluation WHERE family = '${family}' ORDER BY sessions_to DESC, recorded_at DESC LIMIT 1)",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "blue"
+     },
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   }
+  },
+  {
+   "id": 9,
+   "gridPos": {
+    "x": 6,
+    "y": 32,
+    "w": 6,
+    "h": 4
+   },
+   "type": "stat",
+   "title": "Model's top 5",
+   "description": "From the latest held-out check of this model: how often each set reached the target (the net is after costs, selling at the target or the close).",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT model_hit AS \"Model's top 5\" FROM model_evaluation WHERE family = '${family}' AND model_version = (SELECT model_version FROM model_evaluation WHERE family = '${family}' ORDER BY sessions_to DESC, recorded_at DESC LIMIT 1)",
+     "rawQueryText": "SELECT model_hit AS \"Model's top 5\" FROM model_evaluation WHERE family = '${family}' AND model_version = (SELECT model_version FROM model_evaluation WHERE family = '${family}' ORDER BY sessions_to DESC, recorded_at DESC LIMIT 1)",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "blue"
+     },
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   }
+  },
+  {
+   "id": 10,
+   "gridPos": {
+    "x": 12,
+    "y": 32,
+    "w": 6,
+    "h": 4
+   },
+   "type": "stat",
+   "title": "Most volatile 5",
+   "description": "From the latest held-out check of this model: how often each set reached the target (the net is after costs, selling at the target or the close).",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT volatile_hit AS \"Most volatile 5\" FROM model_evaluation WHERE family = '${family}' AND model_version = (SELECT model_version FROM model_evaluation WHERE family = '${family}' ORDER BY sessions_to DESC, recorded_at DESC LIMIT 1)",
+     "rawQueryText": "SELECT volatile_hit AS \"Most volatile 5\" FROM model_evaluation WHERE family = '${family}' AND model_version = (SELECT model_version FROM model_evaluation WHERE family = '${family}' ORDER BY sessions_to DESC, recorded_at DESC LIMIT 1)",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "blue"
+     },
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   }
+  },
+  {
+   "id": 11,
+   "gridPos": {
+    "x": 18,
+    "y": 32,
+    "w": 6,
+    "h": 4
+   },
+   "type": "stat",
+   "title": "Top 5, net a trade",
+   "description": "From the latest held-out check of this model: how often each set reached the target (the net is after costs, selling at the target or the close).",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT model_net AS \"Top 5, net a trade\" FROM model_evaluation WHERE family = '${family}' AND model_version = (SELECT model_version FROM model_evaluation WHERE family = '${family}' ORDER BY sessions_to DESC, recorded_at DESC LIMIT 1)",
+     "rawQueryText": "SELECT model_net AS \"Top 5, net a trade\" FROM model_evaluation WHERE family = '${family}' AND model_version = (SELECT model_version FROM model_evaluation WHERE family = '${family}' ORDER BY sessions_to DESC, recorded_at DESC LIMIT 1)",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "blue"
+     },
+     "decimals": 2
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center"
+   }
+  },
+  {
+   "id": 12,
+   "gridPos": {
+    "x": 0,
+    "y": 36,
+    "w": 12,
+    "h": 9
+   },
+   "type": "barchart",
+   "title": "Held-out record by edge",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "description": "In the held-out month: how often stocks reached the target, by how far their chance sat above the base rate at the same point. This is what today.sh's flag (+10 or more) quotes.",
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT CASE WHEN json_extract(b.value, '$.from') <= -100 THEN 'below 0'\n            WHEN json_extract(b.value, '$.to') >= 100 THEN printf('%+d or more', json_extract(b.value, '$.from'))\n            ELSE printf('%+d to %+d', json_extract(b.value, '$.from'), json_extract(b.value, '$.to')) END AS \"Edge\",\n       100.0 * json_extract(b.value, '$.hit') AS \"Reached\", 100.0 * json_extract(b.value, '$.base') AS \"Base rate\",\n       json_extract(b.value, '$.rows') AS \"Checks\"\nFROM model_evaluation e, json_each(e.evaluation, '$.by_edge') b\nWHERE e.model_version = (SELECT model_version FROM model_evaluation WHERE family = '${family}' ORDER BY sessions_to DESC, recorded_at DESC LIMIT 1)\nORDER BY json_extract(b.value, '$.from')",
+     "rawQueryText": "SELECT CASE WHEN json_extract(b.value, '$.from') <= -100 THEN 'below 0'\n            WHEN json_extract(b.value, '$.to') >= 100 THEN printf('%+d or more', json_extract(b.value, '$.from'))\n            ELSE printf('%+d to %+d', json_extract(b.value, '$.from'), json_extract(b.value, '$.to')) END AS \"Edge\",\n       100.0 * json_extract(b.value, '$.hit') AS \"Reached\", 100.0 * json_extract(b.value, '$.base') AS \"Base rate\",\n       json_extract(b.value, '$.rows') AS \"Checks\"\nFROM model_evaluation e, json_each(e.evaluation, '$.by_edge') b\nWHERE e.model_version = (SELECT model_version FROM model_evaluation WHERE family = '${family}' ORDER BY sessions_to DESC, recorded_at DESC LIMIT 1)\nORDER BY json_extract(b.value, '$.from')",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "decimals": 0
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Checks"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "short"
+       },
+       {
+        "id": "custom.hideFrom",
+        "value": {
+         "viz": true,
+         "legend": true,
+         "tooltip": false
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Base rate"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "text"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Reached"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "green"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "xField": "Edge",
+    "orientation": "vertical",
+    "showValue": "auto",
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 13,
+   "gridPos": {
+    "x": 12,
+    "y": 36,
+    "w": 12,
+    "h": 9
+   },
+   "type": "barchart",
+   "title": "Held-out base rate and top 5, by time of day",
+   "datasource": {
+    "type": "frser-sqlite-datasource",
+    "uid": "stock-predictor-sqlite"
+   },
+   "description": "In the held-out month, at each 15-minute check: how often any stock reached the target from then, and the model's top 5 and the 5 most volatile. Empty for tomorrow.sh, which has one point, the open.",
+   "targets": [
+    {
+     "datasource": {
+      "type": "frser-sqlite-datasource",
+      "uid": "stock-predictor-sqlite"
+     },
+     "refId": "A",
+     "queryText": "SELECT json_extract(p.value, '$.point') AS \"Time\",\n       100.0 * json_extract(p.value, '$.base_hit') AS \"Any stock\",\n       100.0 * json_extract(p.value, '$.model_hit') AS \"Model's top 5\",\n       100.0 * json_extract(p.value, '$.intraday_volatility_hit') AS \"Most volatile 5\"\nFROM model_evaluation e, json_each(e.evaluation, '$.by_point') p\nWHERE e.model_version = (SELECT model_version FROM model_evaluation WHERE family = '${family}' ORDER BY sessions_to DESC, recorded_at DESC LIMIT 1)\nORDER BY json_extract(p.value, '$.point')",
+     "rawQueryText": "SELECT json_extract(p.value, '$.point') AS \"Time\",\n       100.0 * json_extract(p.value, '$.base_hit') AS \"Any stock\",\n       100.0 * json_extract(p.value, '$.model_hit') AS \"Model's top 5\",\n       100.0 * json_extract(p.value, '$.intraday_volatility_hit') AS \"Most volatile 5\"\nFROM model_evaluation e, json_each(e.evaluation, '$.by_point') p\nWHERE e.model_version = (SELECT model_version FROM model_evaluation WHERE family = '${family}' ORDER BY sessions_to DESC, recorded_at DESC LIMIT 1)\nORDER BY json_extract(p.value, '$.point')",
+     "queryType": "table",
+     "timeColumns": []
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "min": 0,
+     "max": 100,
+     "decimals": 0
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Any stock"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "text"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Model's top 5"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "orange"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Most volatile 5"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "purple"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "xField": "Time",
+    "orientation": "vertical",
+    "showValue": "never",
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    }
+   }
+  }
+ ]
+}

@@ -108,6 +108,20 @@ _MIGRATIONS: list[str] = [
     ALTER TABLE summary_pick ADD COLUMN base_rate REAL;
     ALTER TABLE summary_pick ADD COLUMN flagged INTEGER;
     """,
+    # 6: each held-out check (evaluate-target --record), for the Grafana dashboards: the files
+    # beside the models stay the source; this is a copy SQL can read
+    """
+    CREATE TABLE model_evaluation (
+        model_version TEXT PRIMARY KEY,    -- the twin trained without the held-out month
+        family TEXT NOT NULL,              -- model_version before the '/', shared with the live model
+        kind TEXT NOT NULL,                -- 'today' | 'next'
+        target TEXT NOT NULL,              -- what it predicts, in words
+        sessions_from TEXT, sessions_to TEXT, session_count INTEGER,
+        base_hit REAL, model_hit REAL, volatile_hit REAL, base_net REAL, model_net REAL, cost_pct REAL,
+        evaluation TEXT NOT NULL,          -- the whole result, JSON: by_point, by_edge, calibration, ...
+        recorded_at INTEGER NOT NULL
+    );
+    """,
 ]
 
 
@@ -266,6 +280,27 @@ class Store:
     def summary_pick_sessions(self) -> list[str]:
         return [r[0] for r in self._conn.execute(
             "SELECT DISTINCT session_date FROM summary_pick ORDER BY session_date")]
+
+    def save_evaluation(self, model_version: str, kind: str, data: dict, recorded_at: Optional[int] = None) -> None:
+        """Keep a held-out check where SQL can read it (replacing an earlier copy)."""
+        import json
+        import time as _time
+
+        s = data.get("summary") or {}
+        sessions = data.get("sessions") or [None, None]
+        with self.tx() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO model_evaluation (model_version, family, kind, target, sessions_from, "
+                "sessions_to, session_count, base_hit, model_hit, volatile_hit, base_net, model_net, cost_pct, "
+                "evaluation, recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (model_version, model_version.split("/")[0], kind, data.get("target", ""), sessions[0], sessions[-1],
+                 data.get("session_count"), s.get("base_hit"), (s.get("model") or {}).get("hit"),
+                 (s.get("intraday_volatility") or {}).get("hit"), s.get("base_net"),
+                 (s.get("model") or {}).get("net"), data.get("cost_pct"), json.dumps(data),
+                 recorded_at or int(_time.time())))
+
+    def evaluations(self) -> list[dict]:
+        return [dict(r) for r in self._conn.execute("SELECT * FROM model_evaluation ORDER BY recorded_at")]
 
     def score_summary_picks(self, scores: list[dict]) -> None:
         """scores: {id, entry_price, best_gain_pct, close_return_pct, hit, scored_at}."""

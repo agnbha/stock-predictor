@@ -1,0 +1,30 @@
+# Two SQLite files read in place, as stock-analyzer's own dashboards do: no exporter, no second copy.
+# run-local.sh rewrites the two paths below to the real files.
+apiVersion: 1
+
+datasources:
+  # This project's store: what today.sh and tomorrow.sh recorded, how it did, the held-out checks.
+  - name: StockPredictor
+    uid: stock-predictor-sqlite
+    type: frser-sqlite-datasource
+    access: proxy
+    isDefault: true
+    jsonData:
+      path: __STOCK_PREDICTOR_DB__
+      # today.sh writes this file while the dashboards read it; wait out its brief locks.
+      # query_only: a dashboard can never change it.
+      pathPrefix: "file:"
+      pathOptions: "_pragma=busy_timeout(10000)&_pragma=query_only(1)"
+
+  # stock-analyzer's database, for the actual minute candles. Opened read-write only so SQLite can
+  # create its WAL index when no stock-analyzer process has it open (a strictly read-only open then
+  # fails); query_only refuses every write, as stock-predictor's own connection does.
+  - name: StockAnalyzer (read-only)
+    uid: stock-analyzer-readonly
+    type: frser-sqlite-datasource
+    access: proxy
+    isDefault: false
+    jsonData:
+      path: __STOCK_ANALYZER_DB__
+      pathPrefix: "file:"
+      pathOptions: "_pragma=busy_timeout(10000)&_pragma=query_only(1)"

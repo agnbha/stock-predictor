@@ -28,6 +28,7 @@ import argparse
 import json
 import sys
 from datetime import date
+from typing import Optional
 
 from stock_predictor.clock import NSE
 from stock_predictor.config import CONFIG, OPENING_RANGE_T1, PREOPEN_T0
@@ -463,6 +464,16 @@ def cmd_models(args) -> int:
     from stock_predictor.models import ModelRegistry, card_target
 
     reg = ModelRegistry()
+    if args.to_store:
+        n = 0
+        for c in reg.cards():
+            data = reg.load_extra(c.model_version, "evaluation")
+            if data is not None:
+                when = int((reg._dir(c.model_version) / "evaluation.json").stat().st_mtime)  # when it was recorded
+                _evaluation_to_store(c.model_version, "next" if c.entry == "next_open" else "today", data, when)
+                n += 1
+        print(f"copied {n} held-out check(s) into the store's model_evaluation table")
+        return 0
     if args.prune is not None:
         gone = reg.prune(args.prune, dry_run=args.dry_run)
         verb = "would remove" if args.dry_run else "removed"
@@ -554,7 +565,14 @@ def cmd_evaluate_target(args) -> int:
         ]
         data["model_version"] = version
         print(f"recorded -> {ModelRegistry().save_extra(version, 'evaluation', data)}")
+        _evaluation_to_store(version, "today", data)
     return 0
+
+
+def _evaluation_to_store(version: str, kind: str, data: dict, recorded_at: Optional[int] = None) -> None:
+    """A copy in the store, where the Grafana dashboards read it."""
+    with Store() as store:
+        store.save_evaluation(version, kind, data, recorded_at)
 
 
 def _print_by_edge(buckets) -> None:
@@ -613,6 +631,7 @@ def _evaluate_next_session(args, version, model, card, cfg) -> int:
         data = rep.to_dict()
         data["model_version"] = version
         print(f"recorded -> {ModelRegistry().save_extra(version, 'evaluation', data)}")
+        _evaluation_to_store(version, "next", data)
     return 0
 
 
@@ -975,6 +994,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="delete superseded models, keeping the newest KEEP of each kind "
                          "(never one with a held-out check kept beside it)")
     mo.add_argument("--dry-run", action="store_true", help="with --prune: only list what would go")
+    mo.add_argument("--to-store", action="store_true",
+                    help="copy every recorded held-out check into the store, for the Grafana dashboards "
+                         "(evaluate-target --record does this for new ones)")
     mo.set_defaults(func=cmd_models)
 
     et = sub.add_parser("evaluate-target", parents=[common],
