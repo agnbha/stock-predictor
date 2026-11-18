@@ -845,6 +845,23 @@
    "gridPos": {
     "x": 0,
     "y": 17,
+    "w": 24,
+    "h": 2
+   },
+   "type": "text",
+   "title": "",
+   "transparent": true,
+   "description": "The same stock in stock-analyzer's dashboards, each over its own default time range. Use the browser's Back button to return here.",
+   "options": {
+    "mode": "markdown",
+    "content": "**$symbol** in Stock Analyzer: [Company Details](/d/stockanalyzer-company/company-details?var-symbol=${symbol:percentencode}) · [CAN SLIM](/d/stockanalyzer-canslim/can-slim?var-symbol=${symbol:percentencode}) · [Stock Trend](/d/stockanalyzer-trend/stock-trend?var-symbol=${symbol:percentencode})"
+   }
+  },
+  {
+   "id": 9,
+   "gridPos": {
+    "x": 0,
+    "y": 19,
     "w": 14,
     "h": 11
    },
@@ -1094,10 +1111,10 @@
    }
   },
   {
-   "id": 9,
+   "id": 10,
    "gridPos": {
     "x": 14,
-    "y": 17,
+    "y": 19,
     "w": 10,
     "h": 11
    },

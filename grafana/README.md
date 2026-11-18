@@ -49,6 +49,11 @@ model. To take a stock off, untick it in the Stocks box.
 The time picker has the same options as stock-analyzer's **Candles and Calls**
 page, and it opens on **Today's trading hours** (09:15 today to now).
 
+Each stock's row opens with links to the same stock in stock-analyzer's
+**Company Details**, **CAN SLIM** and **Stock Trend**. Each of those opens on
+its own default time range: 7 days, a year and 3 months. Use the browser's
+Back button to return.
+
 - **Range in price, entry and chance at each run.** Time runs along the
   bottom, with one candle per `today.sh` run:
   - **Candle**: the *Range in price*, from the p25 to the p75 of the best
